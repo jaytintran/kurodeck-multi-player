@@ -26,6 +26,7 @@ import type {
   StorageSummary,
 } from '../types/media';
 import { AudioSpectrumCanvas } from './AudioSpectrumCanvas';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface AudioVaultViewProps {
   tracks: AudioTrackMeta[];
@@ -347,6 +348,7 @@ export function AudioVaultView({
           <p className="text-[11px] text-slate-400 leading-relaxed">
             Audio files are persisted locally in browser IndexedDB for offline playback.
           </p>
+          <PWAInstallButton />
         </div>
         </aside>
       )}

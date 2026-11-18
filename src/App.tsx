@@ -8,7 +8,9 @@ import { AddVideoModal } from './components/AddVideoModal';
 import { AudioTransportBar } from './components/AudioTransportBar';
 import { AudioVaultView } from './components/AudioVaultView';
 import { HybridDeckView } from './components/HybridDeckView';
+import { KurodeckLogo } from './components/KurodeckLogo';
 import { MultiStreamView } from './components/MultiStreamView';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { SavedUrlsView } from './components/SavedUrlsView';
 import { useAudioEngine } from './hooks/useAudioEngine';
 import {
@@ -694,13 +696,14 @@ export default function App() {
       {/* Strict 3-Zone Top Navigation Bar */}
       <header className="sticky top-0 z-30 bg-[#07090E]/92 backdrop-blur-md border-b border-[#1E2638]">
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-8">
-          {/* Zone 1: Single-element brand wordmark */}
+          {/* Zone 1: Brand mark + wordmark */}
           <button
             type="button"
             onClick={() => setActiveView('audio')}
-            className="font-display text-lg font-bold tracking-tight text-slate-100 hover:text-[#06E5F5] transition-colors whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-2.5 font-display text-lg font-bold tracking-tight text-slate-100 hover:text-[#06E5F5] transition-colors whitespace-nowrap shrink-0"
           >
-            Kurodeck
+            <KurodeckLogo className="w-7 h-7 shrink-0" />
+            <span>Kurodeck</span>
           </button>
 
           {/* Zone 2: Clean single-line navigation links */}
@@ -913,6 +916,9 @@ export default function App() {
           }}
         />
       )}
+
+      {/* Live Offline Mode Indicator */}
+      <OfflineIndicator />
 
       {/* Subtle Action Toast */}
       {toastMessage && (

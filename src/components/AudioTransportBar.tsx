@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { formatDuration } from '../lib/format';
 import type { AudioTrackMeta, EqSettings, RepeatMode } from '../types/media';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface AudioTransportBarProps {
   currentTrack: AudioTrackMeta | null;
@@ -357,8 +358,10 @@ export function AudioTransportBar({
           </div>
         </div>
 
-        {/* Speed, EQ, Queue & Volume (Right) */}
-        <div className="hidden sm:flex sm:col-span-3 items-center justify-end gap-2">
+        {/* Speed, EQ, Queue, Install & Volume (Right) */}
+        <div className="hidden sm:flex sm:col-span-3 items-center justify-end gap-1.5">
+          <PWAInstallButton compact />
+
           <button
             type="button"
             onClick={onCyclePlaybackRate}
