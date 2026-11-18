@@ -1,0 +1,6 @@
+{
+  "name": "Kurodeck",
+  "description": "Sleek cyberpunk dark media deck combining an offline digital audio vault, live spectrum player, and YouTube multi-video simultaneous streamer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

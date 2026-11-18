@@ -1,0 +1,113 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-display: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-obsidian: #07090E;
+  --color-carbon: #0E121B;
+  --color-panel: #131824;
+  --color-panel-hover: #192030;
+  --color-hairline: #1E2638;
+  --color-cyan-cyber: #06E5F5;
+  --color-rose-cyber: #F43F5E;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: #07090E;
+    color: #F1F5F9;
+    font-family: var(--font-sans);
+    letter-spacing: 0.01em;
+    color-scheme: dark;
+  }
+
+  h1,
+  h2,
+  h3,
+  .font-display {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #253047 transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: #253047;
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: #364566;
+  }
+}
+
+/* Custom sleek range sliders for audio seek, volume, and EQ */
+input[type="range"].cyber-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"].cyber-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: #1E2638;
+}
+
+input[type="range"].cyber-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 12px;
+  width: 12px;
+  border-radius: 2px;
+  background: #06E5F5;
+  margin-top: -4px;
+  box-shadow: 0 0 8px rgba(6, 229, 245, 0.45);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+input[type="range"].cyber-range:hover::-webkit-slider-thumb {
+  transform: scale(1.18);
+}
+
+input[type="range"].cyber-range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: #1E2638;
+}
+
+input[type="range"].cyber-range::-moz-range-thumb {
+  height: 12px;
+  width: 12px;
+  border: none;
+  border-radius: 2px;
+  background: #06E5F5;
+  box-shadow: 0 0 8px rgba(6, 229, 245, 0.45);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
