@@ -12,18 +12,20 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: 'auto',
         includeAssets: [
           'favicon.ico',
           'favicon-32x32.png',
           'apple-touch-icon.png',
           'icon.svg',
+          'assets/images/*.jpg',
         ],
         manifest: {
           id: '/',
-          name: 'Kurodeck — Offline Audio Vault & Multi-Stream Deck',
+          name: 'Kurodeck — Offline Audio Vault & Subliminal Stack Mixer',
           short_name: 'Kurodeck',
           description:
-            'Sleek cyberpunk dark media deck combining an offline digital audio vault, live spectrum player, and YouTube multi-video simultaneous streamer.',
+            'Cyberpunk dark media deck combining an offline digital audio vault, live spectrum player, and simultaneous YouTube subliminal & frequency stack mixer.',
           theme_color: '#07090E',
           background_color: '#07090E',
           display: 'standalone',
@@ -51,7 +53,13 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,jpg,woff,woff2}'],
+          maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+          navigateFallback: '/index.html',
+          navigateFallbackDenylist: [/^\/api\//],
+          clientsClaim: true,
+          skipWaiting: true,
+          cleanupOutdatedCaches: true,
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -59,7 +67,7 @@ export default defineConfig(() => {
               options: {
                 cacheName: 'google-fonts-cache',
                 expiration: {
-                  maxEntries: 10,
+                  maxEntries: 20,
                   maxAgeSeconds: 60 * 60 * 24 * 365,
                 },
                 cacheableResponse: {
@@ -73,8 +81,22 @@ export default defineConfig(() => {
               options: {
                 cacheName: 'gstatic-fonts-cache',
                 expiration: {
-                  maxEntries: 10,
+                  maxEntries: 30,
                   maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/i\.ytimg\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'youtube-thumbnails-cache',
+                expiration: {
+                  maxEntries: 250,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
                 },
                 cacheableResponse: {
                   statuses: [0, 200],

@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { DragEvent } from 'react';
 import {
   CheckSquare,
   ChevronDown,
   ChevronRight,
+  Download,
   Edit3,
   ExternalLink,
   FolderPlus,
@@ -21,15 +22,24 @@ import {
   Square,
   StickyNote,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
 import { STREAM_FALLBACK_BACKDROP } from '../lib/synthAudio';
-import { getYouTubeThumbnailUrl } from '../lib/youtube';
+import {
+  formatListeningTime,
+  formatRoleLabel,
+  getYouTubeThumbnailUrl,
+  normalizeTopics,
+  SUBLIMINAL_ROLES,
+  SUGGESTED_TOPICS,
+} from '../lib/youtube';
 import type {
   MultiStreamPreset,
   SavedUrlCardSize,
   SavedUrlGroupBy,
   SavedUrlSortBy,
+  SubliminalRole,
   YouTubeFolder,
   YouTubeVideoItem,
 } from '../types/media';
@@ -53,6 +63,8 @@ interface SavedUrlsViewProps {
   onDeleteFolder: (folderId: string) => void;
   onLoadPresetAndSwitch: (preset: MultiStreamPreset) => void;
   onDeletePreset: (presetId: string) => void;
+  onExportBackup: () => void;
+  onImportBackup: (file: File) => void;
 }
 
 const DRAG_MIME = 'application/x-kurodeck-videos';
@@ -93,10 +105,16 @@ export function SavedUrlsView({
   onDeleteFolder,
   onLoadPresetAndSwitch,
   onDeletePreset,
+  onExportBackup,
+  onImportBackup,
 }: SavedUrlsViewProps) {
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
   const [showSidebar, setShowSidebar] = useState(true);
   const [selectedFolder, setSelectedFolder] = useState<string>('all');
   const [selectedChannel, setSelectedChannel] = useState<string>('all');
+  const [selectedRole, setSelectedRole] = useState<string>('all');
+  const [selectedTopics, setSelectedTopics] = useState<string[]>([]);
+  const [topicMatchMode, setTopicMatchMode] = useState<'all' | 'any'>('all');
   const [onlyFavorites, setOnlyFavorites] = useState(false);
   const [onlyWithNotes, setOnlyWithNotes] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -108,17 +126,20 @@ export function SavedUrlsView({
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
 
-  // Drag-and-drop state (cards -> folders, presets, or card reordering)
+  // Drag-and-drop state
   const [draggingVideoIds, setDraggingVideoIds] = useState<string[]>([]);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
   const [dragOverPresetId, setDragOverPresetId] = useState<string | null>(null);
   const [dragOverCardId, setDragOverCardId] = useState<string | null>(null);
 
+  // Edit modal state
   const [editingVideo, setEditingVideo] = useState<YouTubeVideoItem | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editChannel, setEditChannel] = useState('');
   const [editFolderId, setEditFolderId] = useState('');
-  const [editNotes, setEditNotes] = useState('');
+  const [editRole, setEditRole] = useState<SubliminalRole>('subliminal');
+  const [editTopicsInput, setEditTopicsInput] = useState('');
+  const [editBenefits, setEditBenefits] = useState('');
 
   const uniqueChannels = useMemo(() => {
     const set = new Set<string>();
@@ -128,9 +149,36 @@ export function SavedUrlsView({
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [videos]);
 
+  const uniqueTopics = useMemo(() => {
+    const counts = new Map<string, { label: string; count: number }>();
+    for (const v of videos) {
+      for (const topic of v.topics) {
+        const key = topic.toLowerCase();
+        const existing = counts.get(key);
+        if (existing) existing.count += 1;
+        else counts.set(key, { label: topic, count: 1 });
+      }
+    }
+    return Array.from(counts.values()).sort(
+      (a, b) => b.count - a.count || a.label.localeCompare(b.label)
+    );
+  }, [videos]);
+
+  const toggleTopicFilter = (topicLabel: string) => {
+    setSelectedTopics((prev) => {
+      const exists = prev.some((t) => t.toLowerCase() === topicLabel.toLowerCase());
+      if (exists) {
+        return prev.filter((t) => t.toLowerCase() !== topicLabel.toLowerCase());
+      }
+      return [...prev, topicLabel];
+    });
+  };
+
   const hasActiveFilters =
     selectedFolder !== 'all' ||
     selectedChannel !== 'all' ||
+    selectedRole !== 'all' ||
+    selectedTopics.length > 0 ||
     onlyFavorites ||
     onlyWithNotes ||
     searchQuery.trim().length > 0;
@@ -138,6 +186,8 @@ export function SavedUrlsView({
   const resetFilters = () => {
     setSelectedFolder('all');
     setSelectedChannel('all');
+    setSelectedRole('all');
+    setSelectedTopics([]);
     setOnlyFavorites(false);
     setOnlyWithNotes(false);
     setSearchQuery('');
@@ -155,13 +205,28 @@ export function SavedUrlsView({
         return false;
       }
       if (selectedChannel !== 'all' && v.channel.trim() !== selectedChannel) return false;
+      if (selectedRole !== 'all' && v.role !== selectedRole) return false;
       if (onlyFavorites && !v.isFavorite) return false;
-      if (onlyWithNotes && !v.notes.trim()) return false;
+      if (onlyWithNotes && !(v.benefits || v.notes).trim()) return false;
+
+      if (selectedTopics.length > 0) {
+        const lowerVideoTopics = new Set(v.topics.map((t) => t.toLowerCase()));
+        if (topicMatchMode === 'all') {
+          const matchesAll = selectedTopics.every((t) => lowerVideoTopics.has(t.toLowerCase()));
+          if (!matchesAll) return false;
+        } else {
+          const matchesAny = selectedTopics.some((t) => lowerVideoTopics.has(t.toLowerCase()));
+          if (!matchesAny) return false;
+        }
+      }
+
       if (!q) return true;
       return (
         v.title.toLowerCase().includes(q) ||
         v.channel.toLowerCase().includes(q) ||
-        v.notes.toLowerCase().includes(q) ||
+        (v.benefits || v.notes).toLowerCase().includes(q) ||
+        v.topics.some((t) => t.toLowerCase().includes(q)) ||
+        formatRoleLabel(v.role).toLowerCase().includes(q) ||
         v.videoId.toLowerCase().includes(q)
       );
     });
@@ -174,6 +239,13 @@ export function SavedUrlsView({
           return a.channel.localeCompare(b.channel) || a.title.localeCompare(b.title);
         case 'addedAt':
           return b.addedAt - a.addedAt;
+        case 'loops':
+          return (b.loopCount ?? 0) - (a.loopCount ?? 0) || a.title.localeCompare(b.title);
+        case 'listening':
+          return (
+            (b.listeningSeconds ?? 0) - (a.listeningSeconds ?? 0) ||
+            a.title.localeCompare(b.title)
+          );
         case 'custom':
         default:
           return (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
@@ -183,6 +255,9 @@ export function SavedUrlsView({
     videos,
     selectedFolder,
     selectedChannel,
+    selectedRole,
+    selectedTopics,
+    topicMatchMode,
     onlyFavorites,
     onlyWithNotes,
     searchQuery,
@@ -203,21 +278,31 @@ export function SavedUrlsView({
     };
 
     for (const video of filteredAndSortedVideos) {
-      if (groupBy === 'folder') {
+      if (groupBy === 'topic') {
+        if (video.topics.length === 0) {
+          addToBucket('Untagged Topics', video);
+        } else {
+          for (const topic of video.topics) {
+            addToBucket(topic, video);
+          }
+        }
+      } else if (groupBy === 'creator') {
+        addToBucket(video.channel.trim() || 'Unknown Creator', video);
+      } else if (groupBy === 'role') {
+        addToBucket(formatRoleLabel(video.role), video);
+      } else if (groupBy === 'folder') {
         const folderName =
           folders.find((f) => f.id === video.folderId)?.name ?? 'Uncategorized';
         addToBucket(folderName, video);
-      } else if (groupBy === 'channel') {
-        addToBucket(video.channel.trim() || 'Unknown Channel', video);
       } else if (groupBy === 'favorite') {
         addToBucket(video.isFavorite ? 'Favorites' : 'Standard', video);
       } else if (groupBy === 'preset') {
         const memberPresets = presets.filter((p) => p.videoItemIds.includes(video.id));
         if (memberPresets.length === 0) {
-          addToBucket('Not in Any Preset', video);
+          addToBucket('Not in Any Stack Preset', video);
         } else {
           for (const preset of memberPresets) {
-            addToBucket(preset.name, video);
+            addToBucket(`${preset.name} (${preset.routine})`, video);
           }
         }
       } else if (groupBy === 'date') {
@@ -231,10 +316,19 @@ export function SavedUrlsView({
     } else if (groupBy === 'date') {
       const order = ['Today', 'Last 7 Days', 'Last 30 Days', 'Earlier'];
       entries.sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
+    } else if (groupBy === 'role') {
+      const order = SUBLIMINAL_ROLES.map((r) => r.label);
+      entries.sort(([a], [b]) => order.indexOf(a) - order.indexOf(b));
+    } else if (groupBy === 'topic') {
+      entries.sort(([a], [b]) => {
+        if (a === 'Untagged Topics') return 1;
+        if (b === 'Untagged Topics') return -1;
+        return a.localeCompare(b);
+      });
     } else if (groupBy === 'preset') {
       entries.sort(([a], [b]) => {
-        if (a === 'Not in Any Preset') return 1;
-        if (b === 'Not in Any Preset') return -1;
+        if (a === 'Not in Any Stack Preset') return 1;
+        if (b === 'Not in Any Stack Preset') return -1;
         return a.localeCompare(b);
       });
     } else {
@@ -285,22 +379,27 @@ export function SavedUrlsView({
     setEditTitle(video.title);
     setEditChannel(video.channel);
     setEditFolderId(video.folderId);
-    setEditNotes(video.notes);
+    setEditRole(video.role);
+    setEditTopicsInput(video.topics.join(', '));
+    setEditBenefits(video.benefits || video.notes);
   };
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingVideo || !editTitle.trim()) return;
+    const cleanBenefits = editBenefits.trim();
     onUpdateVideo(editingVideo.id, {
       title: editTitle.trim(),
       channel: editChannel.trim() || 'YouTube',
-      folderId: editFolderId || folders[0]?.id || 'fld_ambience',
-      notes: editNotes.trim(),
+      folderId: editFolderId || folders[0]?.id || 'fld_focus',
+      role: editRole,
+      topics: normalizeTopics(editTopicsInput),
+      benefits: cleanBenefits,
+      notes: cleanBenefits,
     });
     setEditingVideo(null);
   };
 
-  // Drag payload helpers
   const extractDraggedIds = (e: DragEvent): string[] => {
     if (draggingVideoIds.length > 0) return draggingVideoIds;
     try {
@@ -386,10 +485,19 @@ export function SavedUrlsView({
 
   const activeFolderLabel =
     selectedFolder === 'all'
-      ? 'All Saved YouTube URLs'
+      ? 'Subliminal & Frequency Library'
       : selectedFolder === 'favorites'
-        ? 'Favorite Streams'
+        ? 'Favorites'
         : folders.find((f) => f.id === selectedFolder)?.name ?? 'Folder';
+
+  const totalLibraryLoops = useMemo(
+    () => videos.reduce((sum, v) => sum + (v.loopCount || 0), 0),
+    [videos]
+  );
+  const totalLibrarySeconds = useMemo(
+    () => videos.reduce((sum, v) => sum + (v.listeningSeconds || 0), 0),
+    [videos]
+  );
 
   const renderVideoItem = (video: YouTubeVideoItem) => {
     const isSelected = selectedIds.has(video.id);
@@ -397,6 +505,11 @@ export function SavedUrlsView({
     const isDragOver = dragOverCardId === video.id && canReorderCards && !isDragging;
     const folderName =
       folders.find((f) => f.id === video.folderId)?.name ?? 'Uncategorized';
+    const roleLabel = formatRoleLabel(video.role);
+    const benefitsText = video.benefits || video.notes;
+    const statsText = `${video.playCount} plays · ${video.loopCount} loops · ${formatListeningTime(
+      video.listeningSeconds
+    )}`;
 
     if (cardSize === 'list') {
       return (
@@ -426,7 +539,7 @@ export function SavedUrlsView({
           } ${isDragging ? 'opacity-45' : ''}`}
         >
           <span
-            title="Drag to reorder or drop onto a sidebar folder or preset"
+            title="Drag to reorder or drop onto a folder or stack preset"
             className="text-slate-500 hover:text-[#06E5F5] cursor-grab active:cursor-grabbing shrink-0"
           >
             <GripVertical className="w-4 h-4" />
@@ -462,15 +575,31 @@ export function SavedUrlsView({
               <span aria-hidden="true" className="mx-1.5 text-slate-600">
                 ·
               </span>
-              {folderName}
+              <span className="text-slate-200">{roleLabel}</span>
               <span aria-hidden="true" className="mx-1.5 text-slate-600">
                 ·
               </span>
-              <span className="font-mono tabular-nums text-slate-500">{video.videoId}</span>
+              {folderName}
+              {video.topics.length > 0 && (
+                <>
+                  <span aria-hidden="true" className="mx-1.5 text-slate-600">
+                    ·
+                  </span>
+                  <span className="text-[#06E5F5]/90">{video.topics.join(', ')}</span>
+                </>
+              )}
             </p>
-            {video.notes && (
-              <p className="text-xs text-slate-400/80 truncate">{video.notes}</p>
-            )}
+            <p className="text-[11px] font-mono tabular-nums text-slate-500 truncate">
+              {statsText}
+              {benefitsText && (
+                <>
+                  <span aria-hidden="true" className="mx-1.5 text-slate-600">
+                    ·
+                  </span>
+                  <span className="font-sans text-slate-400/90">{benefitsText}</span>
+                </>
+              )}
+            </p>
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
@@ -492,7 +621,7 @@ export function SavedUrlsView({
               className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded transition-colors whitespace-nowrap"
             >
               <Play className="w-3 h-3 fill-current" />
-              Stream
+              Stack
             </button>
             <a
               href={video.url}
@@ -506,7 +635,7 @@ export function SavedUrlsView({
             <button
               type="button"
               onClick={() => openEdit(video)}
-              title="Edit video details"
+              title="Edit details, topics & benefits"
               className="p-1.5 text-slate-400 hover:text-slate-100 rounded"
             >
               <Edit3 className="w-3.5 h-3.5" />
@@ -514,7 +643,7 @@ export function SavedUrlsView({
             <button
               type="button"
               onClick={() => onDeleteVideo(video.id)}
-              title="Delete saved URL"
+              title="Delete entry"
               className="p-1.5 text-slate-400 hover:text-[#F43F5E] rounded"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -566,7 +695,6 @@ export function SavedUrlsView({
           />
           <div className="absolute inset-0 bg-gradient-to-t from-[#07090E]/90 via-transparent to-[#07090E]/40" />
 
-          {/* Top-left selection + drag grip */}
           <div className="absolute top-2 left-2 flex items-center gap-1">
             <button
               type="button"
@@ -581,7 +709,7 @@ export function SavedUrlsView({
               )}
             </button>
             <span
-              title="Drag to reorder or drop onto a folder or preset"
+              title="Drag to reorder or drop onto a folder or stack preset"
               className="p-1 rounded bg-[#07090E]/80 text-slate-400 group-hover:text-[#06E5F5] transition-colors"
             >
               <GripVertical className="w-3.5 h-3.5" />
@@ -609,13 +737,13 @@ export function SavedUrlsView({
             }`}
           >
             <Play className="w-3 h-3 fill-current" />
-            {isCompact ? 'Play' : 'Stream Now'}
+            {isCompact ? 'Stack' : 'Add to Stack'}
           </button>
         </div>
 
         <div
           className={`flex-1 flex flex-col justify-between ${
-            isCompact ? 'p-2.5 gap-1.5' : isSmall ? 'p-3 gap-2' : isLarge ? 'p-5 gap-3.5' : 'p-4 gap-3'
+            isCompact ? 'p-2.5 gap-1.5' : isSmall ? 'p-3 gap-2' : isLarge ? 'p-5 gap-3' : 'p-3.5 gap-2.5'
           }`}
         >
           <div className="space-y-1">
@@ -632,31 +760,52 @@ export function SavedUrlsView({
             >
               {video.title}
             </h3>
+
+            {/* Unboxed Clean Metadata Line (Zero Pill Enclosures) */}
             <p className={`${isCompact ? 'text-[11px]' : 'text-xs'} text-slate-400 truncate`}>
               {video.channel}
               <span aria-hidden="true" className="mx-1.5 text-slate-600">
                 ·
               </span>
-              {folderName}
+              <span className="text-slate-200">{roleLabel}</span>
+              {!isCompact && (
+                <>
+                  <span aria-hidden="true" className="mx-1.5 text-slate-600">
+                    ·
+                  </span>
+                  <span>{folderName}</span>
+                </>
+              )}
             </p>
-            {!isCompact && video.notes && (
+
+            {/* Unboxed Topics List */}
+            {video.topics.length > 0 && (
+              <p className="text-[11px] text-[#06E5F5]/85 truncate">
+                {video.topics.join(' · ')}
+              </p>
+            )}
+
+            {/* Benefits / Affirmations Preview */}
+            {!isCompact && benefitsText && (
               <p
                 className={`text-xs text-slate-400/90 pt-0.5 ${
                   isLarge ? 'line-clamp-3' : 'line-clamp-2'
                 }`}
               >
-                {video.notes}
+                {benefitsText}
               </p>
             )}
           </div>
 
           <div
             className={`flex items-center justify-between border-t border-[#182032] ${
-              isCompact ? 'pt-1.5' : 'pt-2.5'
+              isCompact ? 'pt-1.5' : 'pt-2'
             }`}
           >
             <span className="text-[11px] font-mono tabular-nums text-slate-500 truncate">
-              {video.videoId}
+              {isCompact
+                ? `${video.loopCount}L · ${formatListeningTime(video.listeningSeconds)}`
+                : statsText}
             </span>
             <div className="flex items-center gap-0.5 shrink-0">
               {!isCompact && (
@@ -665,7 +814,7 @@ export function SavedUrlsView({
                   target="_blank"
                   rel="noopener noreferrer"
                   title="Open YouTube URL"
-                  className="p-1.5 text-slate-400 hover:text-slate-100 rounded"
+                  className="p-1 text-slate-400 hover:text-slate-100 rounded"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
@@ -673,7 +822,7 @@ export function SavedUrlsView({
               <button
                 type="button"
                 onClick={() => openEdit(video)}
-                title="Edit video details"
+                title="Edit metadata, topics & benefits"
                 className="p-1 text-slate-400 hover:text-slate-100 rounded"
               >
                 <Edit3 className="w-3.5 h-3.5" />
@@ -681,7 +830,7 @@ export function SavedUrlsView({
               <button
                 type="button"
                 onClick={() => onDeleteVideo(video.id)}
-                title="Delete saved URL"
+                title="Delete entry"
                 className="p-1 text-slate-400 hover:text-[#F43F5E] rounded"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -697,12 +846,25 @@ export function SavedUrlsView({
 
   return (
     <div className="flex flex-col lg:flex-row lg:h-[calc(100vh-56px-76px)] lg:overflow-hidden">
-      {/* Pinned Independent-Scroll Left Sidebar: Folders & Presets (Drop Targets) */}
+      {/* Hidden JSON Backup Import Input */}
+      <input
+        ref={backupInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onImportBackup(file);
+          e.target.value = '';
+        }}
+      />
+
+      {/* Pinned Independent-Scroll Left Sidebar */}
       {showSidebar && (
         <aside className="w-full lg:w-68 lg:h-full lg:overflow-y-auto shrink-0 border-b lg:border-b-0 lg:border-r border-[#1E2638] bg-[#0B0E17] p-4 space-y-5">
           <div className="space-y-1">
             <div className="flex items-center justify-between px-2.5 mb-2">
-              <p className="text-xs font-medium text-slate-400">URL Library</p>
+              <p className="text-xs font-medium text-slate-400">Library</p>
               <button
                 type="button"
                 onClick={() => setShowSidebar(false)}
@@ -721,7 +883,7 @@ export function SavedUrlsView({
                   : 'text-slate-300 hover:bg-[#111624] hover:text-slate-100'
               }`}
             >
-              <span>All Videos</span>
+              <span>All Subliminals</span>
               <span className="text-xs font-mono tabular-nums text-slate-400">{videos.length}</span>
             </button>
             <button
@@ -744,7 +906,7 @@ export function SavedUrlsView({
             <div className="px-2.5 py-2 text-[11px] text-[#06E5F5] bg-[#06E5F5]/10 border border-[#06E5F5]/35 rounded-md">
               Drop {draggingVideoIds.length}{' '}
               {draggingVideoIds.length === 1 ? 'card' : 'cards'} onto any Folder to move, or onto a
-              Preset to append.
+              Stack Preset to append.
             </div>
           )}
 
@@ -836,11 +998,11 @@ export function SavedUrlsView({
             })}
           </div>
 
-          {/* Saved Presets (Drop Targets) */}
+          {/* Saved Routine Stack Presets (Drop Targets) */}
           <div className="pt-4 border-t border-[#1E2638] space-y-2">
-            <p className="text-xs font-medium text-slate-400 px-2.5">Multi-Stream Presets</p>
+            <p className="text-xs font-medium text-slate-400 px-2.5">Routine Stack Presets</p>
             {presets.length === 0 ? (
-              <p className="px-2.5 text-xs text-slate-500">No saved grid presets yet.</p>
+              <p className="px-2.5 text-xs text-slate-500">No saved stacks yet.</p>
             ) : (
               <div className="space-y-1.5">
                 {presets.map((preset) => {
@@ -874,7 +1036,7 @@ export function SavedUrlsView({
                           {preset.name}
                         </p>
                         <p className="text-[11px] font-mono tabular-nums text-slate-400">
-                          {preset.videoItemIds.length} streams
+                          {preset.routine} · {preset.videoItemIds.length} tracks
                         </p>
                       </button>
                       <button
@@ -891,19 +1053,45 @@ export function SavedUrlsView({
               </div>
             )}
           </div>
+
+          {/* Local JSON Backup & Restore */}
+          <div className="pt-4 border-t border-[#1E2638] space-y-2">
+            <p className="text-xs font-medium text-slate-400 px-2.5">Library Backup</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                onClick={onExportBackup}
+                className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-[#111624] hover:bg-[#172033] border border-[#1E2638] hover:border-[#2C3752] rounded-md transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-[#06E5F5]" />
+                Export
+              </button>
+              <button
+                type="button"
+                onClick={() => backupInputRef.current?.click()}
+                className="inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-200 bg-[#111624] hover:bg-[#172033] border border-[#1E2638] hover:border-[#2C3752] rounded-md transition-colors"
+              >
+                <Upload className="w-3.5 h-3.5 text-[#06E5F5]" />
+                Import
+              </button>
+            </div>
+            <p className="px-1 text-[11px] text-slate-500 leading-relaxed">
+              Saves your URLs, topics, roles, benefits, stats, folders, and routine stacks as JSON.
+            </p>
+          </div>
         </aside>
       )}
 
-      {/* Independently Scrollable Main Video Organizer Canvas */}
+      {/* Independently Scrollable Main Library Canvas */}
       <div className="flex-1 min-w-0 lg:h-full lg:overflow-y-auto p-4 sm:p-6 space-y-4">
-        {/* Top Row: Title + Search + Add URL */}
+        {/* Top Row: Title + Totals + Search + Batch Import */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             {!showSidebar && (
               <button
                 type="button"
                 onClick={() => setShowSidebar(true)}
-                title="Expand folders & presets sidebar"
+                title="Expand folders & stacks sidebar"
                 className="p-2 text-slate-300 hover:text-[#06E5F5] bg-[#0E121B] border border-[#1E2638] rounded-md shrink-0"
               >
                 <PanelLeftOpen className="w-4 h-4" />
@@ -914,14 +1102,19 @@ export function SavedUrlsView({
                 {activeFolderLabel}
               </h1>
               <p className="text-xs text-slate-400">
-                <span className="font-mono tabular-nums">
-                  {filteredAndSortedVideos.length}
-                </span>{' '}
-                {filteredAndSortedVideos.length === 1 ? 'video' : 'videos'}
+                <span className="font-mono tabular-nums">{filteredAndSortedVideos.length}</span>{' '}
+                {filteredAndSortedVideos.length === 1 ? 'item' : 'items'}
                 <span aria-hidden="true" className="mx-1.5 text-slate-600">
                   ·
                 </span>
-                Drag cards to reorder or drop onto sidebar folders & presets
+                <span className="font-mono tabular-nums">{totalLibraryLoops}</span> total loops
+                <span aria-hidden="true" className="mx-1.5 text-slate-600">
+                  ·
+                </span>
+                <span className="font-mono tabular-nums">
+                  {formatListeningTime(totalLibrarySeconds)}
+                </span>{' '}
+                listened
               </p>
             </div>
           </div>
@@ -933,7 +1126,7 @@ export function SavedUrlsView({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search title, channel, notes..."
+                placeholder="Search title, creator, topic, benefits..."
                 className="w-full pl-8 pr-3 py-2 text-xs bg-[#0E121B] border border-[#1E2638] rounded-md text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-[#06E5F5]"
               />
             </div>
@@ -944,124 +1137,180 @@ export function SavedUrlsView({
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded-md transition-colors whitespace-nowrap shrink-0"
             >
               <Plus className="w-3.5 h-3.5" />
-              Add URL
+              Batch Import
             </button>
           </div>
         </div>
 
-        {/* Control Toolbar: Filters, Group By, Sort & Card Size */}
-        <div className="bg-[#0E121B] border border-[#1E2638] rounded-lg p-3 flex flex-wrap items-center justify-between gap-3">
-          {/* Left: Filter & Group/Sort Controls */}
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={selectedChannel}
-              onChange={(e) => setSelectedChannel(e.target.value)}
-              aria-label="Filter by channel"
-              className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
-            >
-              <option value="all">Channel: All</option>
-              {uniqueChannels.map((ch) => (
-                <option key={ch} value={ch}>
-                  {ch}
-                </option>
-              ))}
-            </select>
-
-            <button
-              type="button"
-              onClick={() => setOnlyFavorites((prev) => !prev)}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-                onlyFavorites
-                  ? 'bg-[#F43F5E]/15 text-[#F43F5E] border-[#F43F5E]/45'
-                  : 'bg-[#07090E] text-slate-300 border-[#253047] hover:text-slate-100'
-              }`}
-            >
-              <Heart className={`w-3.5 h-3.5 ${onlyFavorites ? 'fill-current' : ''}`} />
-              Favorites
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setOnlyWithNotes((prev) => !prev)}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
-                onlyWithNotes
-                  ? 'bg-[#06E5F5]/15 text-[#06E5F5] border-[#06E5F5]/45'
-                  : 'bg-[#07090E] text-slate-300 border-[#253047] hover:text-slate-100'
-              }`}
-            >
-              <StickyNote className="w-3.5 h-3.5" />
-              Has Notes
-            </button>
-
-            <span aria-hidden="true" className="hidden sm:inline-block h-4 w-px bg-[#1E2638] mx-0.5" />
-
-            <select
-              value={groupBy}
-              onChange={(e) => {
-                setGroupBy(e.target.value as SavedUrlGroupBy);
-                setCollapsedGroups(new Set());
-              }}
-              aria-label="Group videos by key"
-              className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
-            >
-              <option value="none">Group By: None</option>
-              <option value="folder">Group By: Folder</option>
-              <option value="channel">Group By: Channel</option>
-              <option value="favorite">Group By: Favorite</option>
-              <option value="preset">Group By: Preset</option>
-              <option value="date">Group By: Date Added</option>
-            </select>
-
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as SavedUrlSortBy)}
-              aria-label="Sort saved videos"
-              className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
-            >
-              <option value="custom">Sort: Custom Order</option>
-              <option value="title">Sort: Title</option>
-              <option value="channel">Sort: Channel</option>
-              <option value="addedAt">Sort: Date Added</option>
-            </select>
-
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={resetFilters}
-                className="inline-flex items-center gap-1 px-2 py-1.5 text-xs text-slate-400 hover:text-[#06E5F5] transition-colors whitespace-nowrap"
+        {/* Control Toolbar: Creator, Role, Favorites, Benefits, Group By, Sort, Card Size */}
+        <div className="bg-[#0E121B] border border-[#1E2638] rounded-lg p-3 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selectedChannel}
+                onChange={(e) => setSelectedChannel(e.target.value)}
+                aria-label="Filter by creator"
+                className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
               >
-                <RotateCcw className="w-3 h-3" />
-                Reset
-              </button>
-            )}
-          </div>
+                <option value="all">Creator: All</option>
+                {uniqueChannels.map((ch) => (
+                  <option key={ch} value={ch}>
+                    {ch}
+                  </option>
+                ))}
+              </select>
 
-          {/* Right: Card Size Presets + List */}
-          <div
-            className="flex items-center gap-0.5 p-0.5 bg-[#07090E] border border-[#1E2638] rounded-md"
-            role="group"
-            aria-label="Card size options"
-          >
-            {CARD_SIZE_OPTIONS.map((opt) => (
+              <select
+                value={selectedRole}
+                onChange={(e) => setSelectedRole(e.target.value)}
+                aria-label="Filter by role"
+                className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
+              >
+                <option value="all">Role: All</option>
+                {SUBLIMINAL_ROLES.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+
               <button
-                key={opt.value}
                 type="button"
-                onClick={() => onCardSizeChange(opt.value)}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                  cardSize === opt.value
-                    ? 'bg-[#172033] text-[#06E5F5]'
-                    : 'text-slate-400 hover:text-slate-100'
+                onClick={() => setOnlyFavorites((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+                  onlyFavorites
+                    ? 'bg-[#F43F5E]/15 text-[#F43F5E] border-[#F43F5E]/45'
+                    : 'bg-[#07090E] text-slate-300 border-[#253047] hover:text-slate-100'
                 }`}
               >
-                {opt.value === 'list' ? (
-                  <List className="w-3 h-3" />
-                ) : opt.value === 'compact' ? (
-                  <LayoutGrid className="w-3 h-3" />
-                ) : null}
-                {opt.label}
+                <Heart className={`w-3.5 h-3.5 ${onlyFavorites ? 'fill-current' : ''}`} />
+                Favorites
               </button>
-            ))}
+
+              <button
+                type="button"
+                onClick={() => setOnlyWithNotes((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded border transition-colors whitespace-nowrap ${
+                  onlyWithNotes
+                    ? 'bg-[#06E5F5]/15 text-[#06E5F5] border-[#06E5F5]/45'
+                    : 'bg-[#07090E] text-slate-300 border-[#253047] hover:text-slate-100'
+                }`}
+              >
+                <StickyNote className="w-3.5 h-3.5" />
+                Benefits
+              </button>
+
+              <span aria-hidden="true" className="hidden sm:inline-block h-4 w-px bg-[#1E2638] mx-0.5" />
+
+              <select
+                value={groupBy}
+                onChange={(e) => {
+                  setGroupBy(e.target.value as SavedUrlGroupBy);
+                  setCollapsedGroups(new Set());
+                }}
+                aria-label="Group library items"
+                className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
+              >
+                <option value="none">Group By: None</option>
+                <option value="topic">Group By: Topic</option>
+                <option value="creator">Group By: Creator</option>
+                <option value="role">Group By: Role</option>
+                <option value="folder">Group By: Folder</option>
+                <option value="preset">Group By: Stack Preset</option>
+                <option value="favorite">Group By: Favorite</option>
+                <option value="date">Group By: Date Added</option>
+              </select>
+
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SavedUrlSortBy)}
+                aria-label="Sort library items"
+                className="px-2.5 py-1.5 text-xs bg-[#07090E] border border-[#253047] rounded text-slate-200 focus:outline-none focus:border-[#06E5F5]"
+              >
+                <option value="custom">Sort: Custom Order</option>
+                <option value="title">Sort: Title</option>
+                <option value="channel">Sort: Creator</option>
+                <option value="addedAt">Sort: Date Added</option>
+                <option value="loops">Sort: Most Loops</option>
+                <option value="listening">Sort: Listening Time</option>
+              </select>
+
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  onClick={resetFilters}
+                  className="inline-flex items-center gap-1 px-2 py-1.5 text-xs text-slate-400 hover:text-[#06E5F5] transition-colors whitespace-nowrap"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Reset
+                </button>
+              )}
+            </div>
+
+            <div
+              className="flex items-center gap-0.5 p-0.5 bg-[#07090E] border border-[#1E2638] rounded-md"
+              role="group"
+              aria-label="Card size options"
+            >
+              {CARD_SIZE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => onCardSizeChange(opt.value)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                    cardSize === opt.value
+                      ? 'bg-[#172033] text-[#06E5F5]'
+                      : 'text-slate-400 hover:text-slate-100'
+                  }`}
+                >
+                  {opt.value === 'list' ? (
+                    <List className="w-3 h-3" />
+                  ) : opt.value === 'compact' ? (
+                    <LayoutGrid className="w-3 h-3" />
+                  ) : null}
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {/* Interactive Multi-Topic Filter Bar */}
+          {uniqueTopics.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-[#182032]">
+              <span className="text-[11px] font-medium text-slate-500 mr-1">Topics:</span>
+              {uniqueTopics.map(({ label, count }) => {
+                const active = selectedTopics.some(
+                  (t) => t.toLowerCase() === label.toLowerCase()
+                );
+                return (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => toggleTopicFilter(label)}
+                    className={`px-2 py-0.5 text-[11px] font-medium rounded border transition-colors ${
+                      active
+                        ? 'bg-[#06E5F5]/15 text-[#06E5F5] border-[#06E5F5]/50'
+                        : 'bg-[#07090E] text-slate-300 border-[#1E2638] hover:border-[#2C3752]'
+                    }`}
+                  >
+                    {label}{' '}
+                    <span className="font-mono tabular-nums text-slate-500">{count}</span>
+                  </button>
+                );
+              })}
+
+              {selectedTopics.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => setTopicMatchMode((m) => (m === 'all' ? 'any' : 'all'))}
+                  className="ml-auto px-2 py-0.5 text-[11px] font-mono text-[#06E5F5] bg-[#141A29] border border-[#253047] rounded"
+                  title="Switch between matching ALL selected topics vs ANY selected topic"
+                >
+                  Match: {topicMatchMode === 'all' ? 'ALL' : 'ANY'}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Multi-Select Launch Bar */}
@@ -1069,8 +1318,8 @@ export function SavedUrlsView({
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-[#0E1522] border border-[#06E5F5]/40 rounded-lg">
             <p className="text-xs font-medium text-slate-100">
               <span className="font-mono tabular-nums text-[#06E5F5]">{selectedIds.size}</span>{' '}
-              {selectedIds.size === 1 ? 'video' : 'videos'} selected — launch together or drag any
-              selected card to a folder or preset
+              {selectedIds.size === 1 ? 'subliminal' : 'subliminals'} selected — load into Stack
+              Mixer or drag to any sidebar folder or routine preset
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -1079,7 +1328,7 @@ export function SavedUrlsView({
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded transition-colors whitespace-nowrap"
               >
                 <Layers className="w-3.5 h-3.5" />
-                Launch in Multi-Stream
+                Load in Stack Mixer
               </button>
               <button
                 type="button"
@@ -1092,39 +1341,38 @@ export function SavedUrlsView({
           </div>
         )}
 
-        {/* Video Cards (Flat or Grouped Sections) */}
+        {/* Cards (Flat or Grouped) */}
         {filteredAndSortedVideos.length === 0 ? (
           <div className="bg-[#0E121B] border border-[#1E2638] rounded-lg p-12 text-center space-y-3">
             <p className="text-sm font-medium text-slate-200">
-              {hasActiveFilters ? 'No saved videos match these filters' : 'No saved YouTube URLs yet'}
+              {hasActiveFilters
+                ? 'No subliminals match these filters'
+                : 'Your subliminal library is empty'}
             </p>
             <p className="text-xs text-slate-400">
               {hasActiveFilters
-                ? 'Try resetting your active filters or search query.'
-                : 'Add YouTube links to organize them into folders and stream multiple feeds together.'}
+                ? 'Try clearing a topic tag, role filter, or search query.'
+                : 'Batch paste YouTube links with shared roles, topic tags, and benefits notes.'}
             </p>
             {hasActiveFilters ? (
               <button
                 type="button"
                 onClick={resetFilters}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] rounded-md"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded-md"
               >
+                <RotateCcw className="w-3.5 h-3.5" />
                 Reset Filters
               </button>
             ) : (
               <button
                 type="button"
                 onClick={onOpenAddModal}
-                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] rounded-md"
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded-md"
               >
                 <Plus className="w-3.5 h-3.5" />
-                Add First Video URL
+                Batch Import Subliminals
               </button>
             )}
-          </div>
-        ) : groupBy === 'none' ? (
-          <div className={gridClassForCardSize}>
-            {filteredAndSortedVideos.map(renderVideoItem)}
           </div>
         ) : (
           <div className="space-y-6">
@@ -1132,39 +1380,38 @@ export function SavedUrlsView({
               const isCollapsed = collapsedGroups.has(section.key);
               return (
                 <section key={section.key} className="space-y-3">
-                  <div className="flex items-center justify-between gap-3 pb-2 border-b border-[#1E2638]">
-                    <button
-                      type="button"
-                      onClick={() => toggleGroupCollapsed(section.key)}
-                      className="flex items-center gap-2 text-left min-w-0 group"
-                    >
-                      {isCollapsed ? (
-                        <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-[#06E5F5] shrink-0" />
-                      ) : (
-                        <ChevronDown className="w-4 h-4 text-slate-400 group-hover:text-[#06E5F5] shrink-0" />
-                      )}
-                      <h2 className="text-sm font-semibold text-slate-100 truncate">
-                        {section.label}
-                      </h2>
-                      <span className="text-xs font-mono tabular-nums text-slate-400 shrink-0">
-                        · {section.items.length}{' '}
-                        {section.items.length === 1 ? 'video' : 'videos'}
-                      </span>
-                    </button>
+                  {section.label && (
+                    <div className="flex items-center justify-between border-b border-[#1E2638] pb-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleGroupCollapsed(section.key)}
+                        className="inline-flex items-center gap-2 text-sm font-semibold text-slate-100 hover:text-[#06E5F5] transition-colors"
+                      >
+                        {isCollapsed ? (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        ) : (
+                          <ChevronDown className="w-4 h-4 text-slate-400" />
+                        )}
+                        <span>{section.label}</span>
+                        <span className="text-xs font-mono tabular-nums text-slate-500">
+                          {section.items.length}
+                        </span>
+                      </button>
 
-                    <button
-                      type="button"
-                      onClick={() => onLaunchMultiple(section.items)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-[#06E5F5] bg-[#141A29] hover:bg-[#1C2438] border border-[#06E5F5]/30 rounded transition-colors whitespace-nowrap shrink-0"
-                    >
-                      <Layers className="w-3 h-3" />
-                      Stream Group
-                    </button>
-                  </div>
+                      <button
+                        type="button"
+                        onClick={() => onLaunchMultiple(section.items)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-[#06E5F5] bg-[#141A29] hover:bg-[#1C2438] border border-[#253047] rounded transition-colors"
+                      >
+                        <Layers className="w-3 h-3" />
+                        Stack Group
+                      </button>
+                    </div>
+                  )}
 
                   {!isCollapsed && (
                     <div className={gridClassForCardSize}>
-                      {section.items.map(renderVideoItem)}
+                      {section.items.map((video) => renderVideoItem(video))}
                     </div>
                   )}
                 </section>
@@ -1174,16 +1421,16 @@ export function SavedUrlsView({
         )}
       </div>
 
-      {/* Edit Saved Video Modal */}
+      {/* Edit Subliminal Metadata Modal */}
       {editingVideo && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-[#0E121B] border border-[#253047] rounded-lg p-5 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-[#0E121B] border border-[#253047] rounded-lg p-5 space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-slate-100">Edit Saved YouTube URL</h3>
+              <h2 className="text-base font-semibold text-slate-100">Edit Subliminal Details</h2>
               <button
                 type="button"
                 onClick={() => setEditingVideo(null)}
-                className="p-1 text-slate-400 hover:text-slate-100 rounded"
+                className="p-1 text-slate-400 hover:text-slate-100"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1197,56 +1444,104 @@ export function SavedUrlsView({
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
                   required
-                  className="w-full px-3 py-2 text-sm bg-[#07090E] border border-[#253047] rounded text-slate-100 focus:outline-none focus:border-[#06E5F5]"
+                  className="w-full px-3 py-2 text-xs bg-[#07090E] border border-[#253047] rounded-md text-slate-100 focus:outline-none focus:border-[#06E5F5]"
                 />
               </div>
 
-              <div className="space-y-1">
-                <label className="block text-xs text-slate-400">Channel</label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-xs text-slate-400">Creator</label>
+                  <input
+                    type="text"
+                    value={editChannel}
+                    onChange={(e) => setEditChannel(e.target.value)}
+                    className="w-full px-2.5 py-2 text-xs bg-[#07090E] border border-[#253047] rounded-md text-slate-100 focus:outline-none focus:border-[#06E5F5]"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-xs text-slate-400">Role</label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value as SubliminalRole)}
+                    className="w-full px-2.5 py-2 text-xs bg-[#07090E] border border-[#253047] rounded-md text-slate-100 focus:outline-none focus:border-[#06E5F5]"
+                  >
+                    {SUBLIMINAL_ROLES.map((r) => (
+                      <option key={r.value} value={r.value}>
+                        {r.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="block text-xs text-slate-400">Folder</label>
+                  <select
+                    value={editFolderId}
+                    onChange={(e) => setEditFolderId(e.target.value)}
+                    className="w-full px-2.5 py-2 text-xs bg-[#07090E] border border-[#253047] rounded-md text-slate-100 focus:outline-none focus:border-[#06E5F5]"
+                  >
+                    {folders.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-xs text-slate-400">
+                  Topic Tags (comma separated)
+                </label>
                 <input
                   type="text"
-                  value={editChannel}
-                  onChange={(e) => setEditChannel(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-[#07090E] border border-[#253047] rounded text-slate-100 focus:outline-none focus:border-[#06E5F5]"
+                  value={editTopicsInput}
+                  onChange={(e) => setEditTopicsInput(e.target.value)}
+                  placeholder="Focus, Sleep, Confidence, 432Hz"
+                  className="w-full px-3 py-2 text-xs bg-[#07090E] border border-[#253047] rounded-md text-slate-100 focus:outline-none focus:border-[#06E5F5]"
                 />
-              </div>
-
-              <div className="space-y-1">
-                <label className="block text-xs text-slate-400">Folder</label>
-                <select
-                  value={editFolderId}
-                  onChange={(e) => setEditFolderId(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-[#07090E] border border-[#253047] rounded text-slate-100 focus:outline-none focus:border-[#06E5F5]"
-                >
-                  {folders.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.name}
-                    </option>
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {SUGGESTED_TOPICS.slice(0, 8).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => {
+                        const existing = normalizeTopics(editTopicsInput);
+                        if (!existing.some((x) => x.toLowerCase() === t.toLowerCase())) {
+                          setEditTopicsInput([...existing, t].join(', '));
+                        }
+                      }}
+                      className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-[#06E5F5] bg-[#141A29] rounded"
+                    >
+                      + {t}
+                    </button>
                   ))}
-                </select>
+                </div>
               </div>
 
               <div className="space-y-1">
-                <label className="block text-xs text-slate-400">Notes</label>
+                <label className="block text-xs text-slate-400">
+                  Benefits &amp; Affirmations
+                </label>
                 <textarea
-                  rows={2}
-                  value={editNotes}
-                  onChange={(e) => setEditNotes(e.target.value)}
-                  className="w-full px-3 py-2 text-sm bg-[#07090E] border border-[#253047] rounded text-slate-100 focus:outline-none focus:border-[#06E5F5] resize-none"
+                  rows={3}
+                  value={editBenefits}
+                  onChange={(e) => setEditBenefits(e.target.value)}
+                  placeholder="Write benefits, affirmation list, or listening notes..."
+                  className="w-full px-3 py-2 text-xs bg-[#07090E] border border-[#253047] rounded-md text-slate-100 focus:outline-none focus:border-[#06E5F5]"
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2">
+              <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => setEditingVideo(null)}
-                  className="px-4 py-2 text-xs font-medium text-slate-300 bg-[#141A29] rounded"
+                  className="px-3.5 py-2 text-xs text-slate-300 bg-[#141A29] rounded-md"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] rounded"
+                  className="px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded-md"
                 >
                   Save Changes
                 </button>

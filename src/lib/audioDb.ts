@@ -85,9 +85,36 @@ export async function initializeAudioVault(): Promise<{
     };
   }
 
+  // Migrate legacy /src/assets/images/ cover URLs to precached /assets/images/
+  const migratedTracks: AudioTrackRecord[] = [];
+  let needsMigration = false;
+  for (const track of existingTracks) {
+    if (track.coverUrl.startsWith('/src/assets/images/')) {
+      needsMigration = true;
+      migratedTracks.push({
+        ...track,
+        coverUrl: track.coverUrl.replace('/src/assets/images/', '/assets/images/'),
+      });
+    } else {
+      migratedTracks.push(track);
+    }
+  }
+
+  if (needsMigration) {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_TRACKS, 'readwrite');
+      const store = tx.objectStore(STORE_TRACKS);
+      for (const track of migratedTracks) {
+        store.put(track);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
   localStorage.setItem(SEED_FLAG_KEY, 'true');
   return {
-    tracks: existingTracks.map(stripBlob),
+    tracks: migratedTracks.map(stripBlob),
     playlists: existingPlaylists,
   };
 }

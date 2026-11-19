@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AddVideoModal } from './components/AddVideoModal';
 import { AudioTransportBar } from './components/AudioTransportBar';
 import { AudioVaultView } from './components/AudioVaultView';
@@ -13,6 +13,8 @@ import { MultiStreamView } from './components/MultiStreamView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { SavedUrlsView } from './components/SavedUrlsView';
 import { useAudioEngine } from './hooks/useAudioEngine';
+import { useOfflineBootstrap } from './hooks/useOfflineBootstrap';
+import { useOnlineStatus } from './hooks/useOnlineStatus';
 import {
   createPlaylist,
   deletePlaylist,
@@ -25,13 +27,28 @@ import {
 } from './lib/audioDb';
 import { createId } from './lib/format';
 import {
+  exportKurodeckBackupJson,
   extractYouTubeVideoId,
   fetchYouTubeOEmbed,
   getYouTubeCanonicalUrl,
+  loadActiveView,
+  loadGridLayout,
+  loadHybridCrossfade,
+  loadMasterStackVolume,
+  loadPersistedStageSlots,
   loadSavedCardSize,
   loadSavedYouTubeState,
+  loadStackViewMode,
   loadStreamCanvasMode,
+  normalizeTopics,
+  parseKurodeckBackupJson,
+  saveActiveView,
+  saveGridLayout,
+  saveHybridCrossfade,
+  saveMasterStackVolume,
+  savePersistedStageSlots,
   saveSavedCardSize,
+  saveStackViewMode,
   saveStreamCanvasMode,
   saveYouTubeFolders,
   saveYouTubePresets,
@@ -41,12 +58,16 @@ import type {
   AudioPlaylist,
   AudioTrackMeta,
   MultiStreamPreset,
+  PresetRoutine,
+  PresetSlotConfig,
   SavedUrlCardSize,
+  StackViewMode,
   StagePlayerHandle,
   StageSlot,
   StorageSummary,
   StreamCanvasMode,
   StreamGridLayout,
+  SubliminalRole,
   WorkspaceView,
   YouTubeFolder,
   YouTubeVideoItem,
@@ -54,12 +75,16 @@ import type {
 
 const NAV_ITEMS: Array<{ id: WorkspaceView; label: string }> = [
   { id: 'audio', label: 'Audio Vault' },
-  { id: 'multistream', label: 'Multi-Stream' },
+  { id: 'multistream', label: 'Stack Mixer' },
   { id: 'hybrid', label: 'Hybrid Deck' },
-  { id: 'urls', label: 'Saved URLs' },
+  { id: 'urls', label: 'Library' },
 ];
 
-function createStageSlot(video: YouTubeVideoItem, mutedByDefault: boolean): StageSlot {
+function createStageSlot(
+  video: YouTubeVideoItem,
+  mutedByDefault: boolean,
+  override?: Partial<PresetSlotConfig>
+): StageSlot {
   return {
     slotId: createId('slot'),
     videoItemId: video.id,
@@ -67,14 +92,21 @@ function createStageSlot(video: YouTubeVideoItem, mutedByDefault: boolean): Stag
     title: video.title,
     channel: video.channel,
     url: video.url,
-    volume: mutedByDefault ? 45 : 65,
-    isMuted: mutedByDefault,
+    role: video.role ?? 'subliminal',
+    volume: override?.volume ?? (mutedByDefault ? 30 : 45),
+    isMuted: override?.isMuted ?? mutedByDefault,
     isPlaying: false,
+    playbackRate: override?.playbackRate ?? 1,
+    infiniteLoop: override?.infiniteLoop ?? true,
+    targetLoops: override?.targetLoops ?? 10,
+    completedLoops: 0,
   };
 }
 
 export default function App() {
-  const [activeView, setActiveView] = useState<WorkspaceView>('audio');
+  const isOnline = useOnlineStatus();
+
+  const [activeView, setActiveView] = useState<WorkspaceView>(() => loadActiveView());
 
   // Offline Audio Vault state
   const [tracks, setTracks] = useState<AudioTrackMeta[]>([]);
@@ -88,20 +120,29 @@ export default function App() {
     trackCount: 0,
   });
 
-  // YouTube Multi-Stream & URL Organizer state
+  // Subliminal Stack Mixer & Library state
   const [ytVideos, setYtVideos] = useState<YouTubeVideoItem[]>([]);
   const [ytFolders, setYtFolders] = useState<YouTubeFolder[]>([]);
   const [ytPresets, setYtPresets] = useState<MultiStreamPreset[]>([]);
   const [stageSlots, setStageSlots] = useState<StageSlot[]>([]);
-  const [gridLayout, setGridLayout] = useState<StreamGridLayout>('auto');
+  const [stageHydrated, setStageHydrated] = useState(false);
+  const [stackViewMode, setStackViewMode] = useState<StackViewMode>(() => loadStackViewMode());
+  const [gridLayout, setGridLayout] = useState<StreamGridLayout>(() => loadGridLayout());
   const [streamCanvasMode, setStreamCanvasMode] = useState<StreamCanvasMode>(() =>
     loadStreamCanvasMode()
   );
   const [savedCardSize, setSavedCardSize] = useState<SavedUrlCardSize>(() =>
     loadSavedCardSize()
   );
+  const [masterStackVolume, setMasterStackVolume] = useState<number>(() =>
+    loadMasterStackVolume()
+  );
+  const [hybridCrossfade, setHybridCrossfade] = useState<number>(() => loadHybridCrossfade());
   const [soloSlotId, setSoloSlotId] = useState<string | null>(null);
   const [showAddVideoModal, setShowAddVideoModal] = useState(false);
+
+  // Sleep Timer state (countdown seconds; final 30s gently fade to 0 -> Stop All)
+  const [sleepSecondsLeft, setSleepSecondsLeft] = useState<number | null>(null);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -109,16 +150,54 @@ export default function App() {
 
   const globalAudioInputRef = useRef<HTMLInputElement | null>(null);
   const playerHandlesRef = useRef<Map<string, StagePlayerHandle>>(new Map());
+  const stageSlotsRef = useRef<StageSlot[]>(stageSlots);
+  stageSlotsRef.current = stageSlots;
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => {
       setToastMessage(null);
-    }, 3200);
+    }, 3400);
   }, []);
 
-  // Load IndexedDB Offline Audio Vault + Saved YouTube Library on mount
+  // Remember active tab across desktop PWA launches
+  const handleSelectView = useCallback((view: WorkspaceView) => {
+    setActiveView(view);
+    saveActiveView(view);
+  }, []);
+
+  // Single-visit offline PWA bootstrap (persistent storage + font & thumbnail warmup)
+  useOfflineBootstrap({
+    videos: ytVideos,
+    isOnline,
+    onOfflineReady: showToast,
+  });
+
+  // Compute Hybrid Crossfade gains (equal-headroom DJ crossfade: 50 = 100%/100%)
+  const audioCrossfadeGain = useMemo(
+    () => (hybridCrossfade <= 50 ? 1 : Math.max(0, (100 - hybridCrossfade) / 50)),
+    [hybridCrossfade]
+  );
+  const stackCrossfadeGain = useMemo(
+    () => (hybridCrossfade >= 50 ? 1 : Math.max(0, hybridCrossfade / 50)),
+    [hybridCrossfade]
+  );
+
+  // Sleep fade multiplier: gentle linear ramp down over the final 30 seconds
+  const sleepFadeMultiplier = useMemo(() => {
+    if (sleepSecondsLeft === null) return 1;
+    if (sleepSecondsLeft <= 30) return Math.max(0, sleepSecondsLeft / 30);
+    return 1;
+  }, [sleepSecondsLeft]);
+
+  const isSleepFading = sleepSecondsLeft !== null && sleepSecondsLeft <= 30;
+
+  const effectiveAudioMultiplier = audioCrossfadeGain * sleepFadeMultiplier;
+  const effectiveYtMultiplier =
+    (masterStackVolume / 100) * stackCrossfadeGain * sleepFadeMultiplier;
+
+  // Load IndexedDB Offline Audio Vault + Saved Subliminal Library on mount
   useEffect(() => {
     let active = true;
 
@@ -127,11 +206,14 @@ export default function App() {
     setYtFolders(ytState.folders);
     setYtPresets(ytState.presets);
 
-    // Pre-populate 2 starter streams on the Multi-Stream stage (second muted to avoid clash)
-    const initialStreams = ytState.videos.slice(0, 2);
-    setStageSlots(
-      initialStreams.map((video, idx) => createStageSlot(video, idx > 0))
-    );
+    const persistedSlots = loadPersistedStageSlots();
+    if (persistedSlots !== null) {
+      setStageSlots(persistedSlots);
+    } else {
+      const initialStreams = ytState.videos.slice(0, 2);
+      setStageSlots(initialStreams.map((video, idx) => createStageSlot(video, idx > 0)));
+    }
+    setStageHydrated(true);
 
     initializeAudioVault()
       .then(async ({ tracks: loadedTracks, playlists: loadedPlaylists }) => {
@@ -151,13 +233,71 @@ export default function App() {
     };
   }, []);
 
+  // Persist active stage slots so offline relaunches restore exact stack layout & mix
+  useEffect(() => {
+    if (!stageHydrated) return;
+    savePersistedStageSlots(stageSlots);
+  }, [stageSlots, stageHydrated]);
+
   // Refresh storage metrics when track list changes
   useEffect(() => {
     if (isVaultLoading) return;
     void getStorageSummary(tracks).then(setStorageSummary);
   }, [tracks, isVaultLoading]);
 
-  // Increment play count callback
+  // Auto-resolve any URLs saved while offline once connectivity returns
+  useEffect(() => {
+    if (!isOnline || ytVideos.length === 0) return;
+    const pending = ytVideos.filter((v) => v.pendingMetadata);
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    const syncPending = async () => {
+      const updates = new Map<string, { title: string; channel: string }>();
+      for (const item of pending) {
+        const meta = await fetchYouTubeOEmbed(item.videoId);
+        if (cancelled) return;
+        if (meta) {
+          updates.set(item.id, meta);
+        }
+      }
+      if (updates.size === 0 || cancelled) return;
+
+      setYtVideos((prev) => {
+        const next = prev.map((v) => {
+          const hit = updates.get(v.id);
+          if (!hit) return v;
+          return {
+            ...v,
+            title: v.title.startsWith('YouTube Video (') ? hit.title : v.title,
+            channel: hit.channel,
+            pendingMetadata: false,
+          };
+        });
+        saveYouTubeVideos(next);
+        return next;
+      });
+      setStageSlots((prev) =>
+        prev.map((slot) => {
+          const hit = updates.get(slot.videoItemId);
+          if (!hit) return slot;
+          return {
+            ...slot,
+            title: slot.title.startsWith('YouTube Video (') ? hit.title : slot.title,
+            channel: hit.channel,
+          };
+        })
+      );
+      showToast(`Synced metadata for ${updates.size} offline-saved URL(s)`);
+    };
+
+    void syncPending();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOnline, ytVideos, showToast]);
+
+  // Increment offline audio track play count
   const handlePlayCountIncrement = useCallback((trackId: string) => {
     setTracks((prev) => {
       const target = prev.find((t) => t.id === trackId);
@@ -171,7 +311,82 @@ export default function App() {
   const audio = useAudioEngine({
     tracks,
     onTrackPlayCountIncrement: handlePlayCountIncrement,
+    externalGainMultiplier: effectiveAudioMultiplier,
   });
+
+  // Sleep Timer countdown interval -> Stop All when reaching 0
+  useEffect(() => {
+    if (sleepSecondsLeft === null) return;
+    if (sleepSecondsLeft <= 0) {
+      audio.pause();
+      playerHandlesRef.current.forEach((handle) => handle.pause());
+      setStageSlots((prev) => prev.map((s) => ({ ...s, isPlaying: false })));
+      setSleepSecondsLeft(null);
+      showToast('Sleep timer finished — all playback stopped');
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setSleepSecondsLeft((prev) => (prev !== null ? Math.max(0, prev - 1) : null));
+    }, 1000);
+
+    return () => window.clearTimeout(timer);
+  }, [sleepSecondsLeft, audio, showToast]);
+
+  // Track listening minutes (every 5 seconds for all currently playing YouTube subliminals)
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const playingIds = Array.from(
+        new Set(stageSlotsRef.current.filter((s) => s.isPlaying).map((s) => s.videoItemId))
+      );
+      if (playingIds.length === 0) return;
+
+      const playingSet = new Set(playingIds);
+      const now = Date.now();
+      setYtVideos((prev) => {
+        const next = prev.map((v) =>
+          playingSet.has(v.id)
+            ? {
+                ...v,
+                listeningSeconds: (v.listeningSeconds || 0) + 5,
+                lastListenedAt: now,
+              }
+            : v
+        );
+        saveYouTubeVideos(next);
+        return next;
+      });
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, []);
+
+  // Listening stats callbacks for YouTubePlayerTile
+  const handleVideoLoopCompleted = useCallback((videoItemId: string) => {
+    const now = Date.now();
+    setYtVideos((prev) => {
+      const next = prev.map((v) =>
+        v.id === videoItemId
+          ? { ...v, loopCount: (v.loopCount || 0) + 1, lastListenedAt: now }
+          : v
+      );
+      saveYouTubeVideos(next);
+      return next;
+    });
+  }, []);
+
+  const handleVideoPlayed = useCallback((videoItemId: string) => {
+    const now = Date.now();
+    setYtVideos((prev) => {
+      const next = prev.map((v) =>
+        v.id === videoItemId
+          ? { ...v, playCount: (v.playCount || 0) + 1, lastListenedAt: now }
+          : v
+      );
+      saveYouTubeVideos(next);
+      return next;
+    });
+  }, []);
 
   // Offline Audio Vault Handlers
   const handleImportAudioFiles = useCallback(
@@ -265,7 +480,17 @@ export default function App() {
     [showToast]
   );
 
-  // YouTube Multi-Stream Controller Handlers
+  // Stack Mixer Controller Handlers
+  const handleViewModeChange = useCallback((mode: StackViewMode) => {
+    setStackViewMode(mode);
+    saveStackViewMode(mode);
+  }, []);
+
+  const handleGridLayoutChange = useCallback((layout: StreamGridLayout) => {
+    setGridLayout(layout);
+    saveGridLayout(layout);
+  }, []);
+
   const handleCanvasModeChange = useCallback((mode: StreamCanvasMode) => {
     setStreamCanvasMode(mode);
     saveStreamCanvasMode(mode);
@@ -275,6 +500,43 @@ export default function App() {
     setSavedCardSize(size);
     saveSavedCardSize(size);
   }, []);
+
+  const handleMasterStackVolumeChange = useCallback((vol: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(vol)));
+    setMasterStackVolume(clamped);
+    saveMasterStackVolume(clamped);
+  }, []);
+
+  const handleHybridCrossfadeChange = useCallback((val: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(val)));
+    setHybridCrossfade(clamped);
+    saveHybridCrossfade(clamped);
+  }, []);
+
+  const handleApplyQuietLayer = useCallback(() => {
+    setSoloSlotId(null);
+    setStageSlots((prev) => prev.map((s) => ({ ...s, volume: 18, isMuted: false })));
+    showToast('Set all stacked channels to Quiet Layer (18%)');
+  }, [showToast]);
+
+  const handleApplyBalanceAll = useCallback(() => {
+    setSoloSlotId(null);
+    setStageSlots((prev) => prev.map((s) => ({ ...s, volume: 45, isMuted: false })));
+    showToast('Balanced all stacked channels to 45%');
+  }, [showToast]);
+
+  const handleStartSleepTimer = useCallback(
+    (minutes: number) => {
+      setSleepSecondsLeft(minutes * 60);
+      showToast(`Sleep timer set for ${minutes} min (30s gentle fade-out)`);
+    },
+    [showToast]
+  );
+
+  const handleCancelSleepTimer = useCallback(() => {
+    setSleepSecondsLeft(null);
+    showToast('Sleep timer cancelled');
+  }, [showToast]);
 
   const handleRegisterPlayer = useCallback(
     (slotId: string, handle: StagePlayerHandle | null) => {
@@ -310,7 +572,13 @@ export default function App() {
 
   const handlePlayAllStreams = useCallback(() => {
     playerHandlesRef.current.forEach((handle) => handle.play());
-    setStageSlots((prev) => prev.map((s) => ({ ...s, isPlaying: true })));
+    setStageSlots((prev) =>
+      prev.map((s) => ({
+        ...s,
+        isPlaying: true,
+        completedLoops: !s.infiniteLoop && s.completedLoops >= s.targetLoops ? 0 : s.completedLoops,
+      }))
+    );
   }, []);
 
   const handlePauseAllStreams = useCallback(() => {
@@ -328,7 +596,7 @@ export default function App() {
     setSoloSlotId(null);
     playerHandlesRef.current.forEach((handle) => handle.unmute());
     setStageSlots((prev) =>
-      prev.map((s) => ({ ...s, isMuted: false, volume: s.volume === 0 ? 50 : s.volume }))
+      prev.map((s) => ({ ...s, isMuted: false, volume: s.volume === 0 ? 40 : s.volume }))
     );
   }, []);
 
@@ -337,27 +605,21 @@ export default function App() {
       handle.seekTo(0);
       handle.play();
     });
-    setStageSlots((prev) => prev.map((s) => ({ ...s, isPlaying: true })));
-    showToast('Synchronized all active streams to 0:00');
+    setStageSlots((prev) => prev.map((s) => ({ ...s, isPlaying: true, completedLoops: 0 })));
+    showToast('Synchronized all stacked channels to 0:00');
   }, [showToast]);
 
   const handleSoloSlot = useCallback((slotId: string) => {
     setSoloSlotId((prevSolo) => {
       if (prevSolo === slotId) {
+        setStageSlots((prev) => prev.map((s) => ({ ...s, isMuted: false })));
         return null;
       }
-      playerHandlesRef.current.forEach((handle, id) => {
-        if (id === slotId) {
-          handle.unmute();
-        } else {
-          handle.mute();
-        }
-      });
       setStageSlots((prev) =>
         prev.map((s) => ({
           ...s,
           isMuted: s.slotId !== slotId,
-          volume: s.slotId === slotId && s.volume === 0 ? 70 : s.volume,
+          volume: s.slotId === slotId && s.volume === 0 ? 60 : s.volume,
         }))
       );
       return slotId;
@@ -366,11 +628,8 @@ export default function App() {
 
   const handleAddSavedToStage = useCallback(
     (video: YouTubeVideoItem) => {
-      setStageSlots((prev) => {
-        const shouldMute = prev.length > 0;
-        return [...prev, createStageSlot(video, shouldMute)];
-      });
-      showToast(`Added "${video.title}" to Multi-Stream stage`);
+      setStageSlots((prev) => [...prev, createStageSlot(video, false)]);
+      showToast(`Added "${video.title}" to Stack Mixer`);
     },
     [showToast]
   );
@@ -385,19 +644,23 @@ export default function App() {
     setStageSlots([]);
   }, []);
 
-  // Resolve and save one or many YouTube URLs
+  // Resolve and save one or many YouTube subliminal URLs (works online & offline)
   const resolveAndSaveVideos = useCallback(
     async ({
       rawInput,
       folderId,
+      role = 'subliminal',
+      topics = [],
       customTitle,
-      notes,
+      benefits,
       launchToStage,
     }: {
       rawInput: string;
       folderId: string;
+      role?: SubliminalRole;
+      topics?: string[];
       customTitle?: string;
-      notes?: string;
+      benefits?: string;
       launchToStage: boolean;
     }): Promise<{ addedCount: number; error: string | null }> => {
       const lines = rawInput
@@ -417,9 +680,12 @@ export default function App() {
         return {
           addedCount: 0,
           error:
-            'Enter a valid YouTube link (youtube.com/watch?v=..., youtu.be/..., shorts, live) or 11-character video ID.',
+            'Enter a valid YouTube link (youtube.com/watch?v=..., youtu.be/..., shorts) or 11-character video ID.',
         };
       }
+
+      const cleanTopics = normalizeTopics(topics);
+      const cleanBenefits = benefits?.trim() || '';
 
       const resolvedItems: YouTubeVideoItem[] = [];
       for (let i = 0; i < extractedIds.length; i += 1) {
@@ -430,7 +696,7 @@ export default function App() {
           continue;
         }
 
-        const meta = await fetchYouTubeOEmbed(videoId);
+        const meta = isOnline ? await fetchYouTubeOEmbed(videoId) : null;
         const item: YouTubeVideoItem = {
           id: createId('yt'),
           videoId,
@@ -438,10 +704,17 @@ export default function App() {
           title:
             extractedIds.length === 1 && customTitle?.trim()
               ? customTitle.trim()
-              : meta?.title ?? `YouTube Stream (${videoId})`,
-          channel: meta?.channel ?? 'YouTube',
-          folderId: folderId || ytFolders[0]?.id || 'fld_ambience',
-          notes: notes?.trim() || '',
+              : meta?.title ?? `YouTube Video (${videoId})`,
+          channel: meta?.channel ?? (isOnline ? 'YouTube' : 'Offline — Pending Sync'),
+          folderId: folderId || ytFolders[0]?.id || 'fld_focus',
+          notes: cleanBenefits,
+          role,
+          topics: cleanTopics,
+          benefits: cleanBenefits,
+          playCount: 0,
+          loopCount: 0,
+          listeningSeconds: 0,
+          pendingMetadata: !meta,
           addedAt: Date.now() + i,
           isFavorite: false,
           sortOrder: 0,
@@ -449,7 +722,6 @@ export default function App() {
         resolvedItems.push(item);
       }
 
-      // Persist newly created entries at top of custom order
       const newOnes = resolvedItems.filter(
         (item) => !ytVideos.some((existing) => existing.id === item.id)
       );
@@ -465,27 +737,25 @@ export default function App() {
       if (launchToStage) {
         setStageSlots((prev) => [
           ...prev,
-          ...resolvedItems.map((video, idx) =>
-            createStageSlot(video, prev.length + idx > 0)
-          ),
+          ...resolvedItems.map((video) => createStageSlot(video, false)),
         ]);
       }
 
       showToast(
         launchToStage
-          ? `Added ${resolvedItems.length} ${resolvedItems.length === 1 ? 'stream' : 'streams'} to stage`
-          : `Saved ${newOnes.length || resolvedItems.length} YouTube URL(s)`
+          ? `Added ${resolvedItems.length} ${resolvedItems.length === 1 ? 'track' : 'tracks'} to Stack Mixer`
+          : `Saved ${newOnes.length || resolvedItems.length} subliminal URL(s)`
       );
       return { addedCount: resolvedItems.length, error: null };
     },
-    [ytVideos, ytFolders, showToast]
+    [ytVideos, ytFolders, isOnline, showToast]
   );
 
   const handleQuickAddUrl = useCallback(
     async (rawUrl: string): Promise<string | null> => {
       const res = await resolveAndSaveVideos({
         rawInput: rawUrl,
-        folderId: ytFolders[0]?.id ?? 'fld_ambience',
+        folderId: ytFolders[0]?.id ?? 'fld_focus',
         launchToStage: true,
       });
       return res.error;
@@ -494,39 +764,67 @@ export default function App() {
   );
 
   const handleSavePreset = useCallback(
-    (name: string) => {
+    (name: string, routine: PresetRoutine) => {
+      const slotConfigs: PresetSlotConfig[] = stageSlots.map((s) => ({
+        videoItemId: s.videoItemId,
+        volume: s.volume,
+        isMuted: s.isMuted,
+        playbackRate: s.playbackRate,
+        infiniteLoop: s.infiniteLoop,
+        targetLoops: s.targetLoops,
+      }));
       const preset: MultiStreamPreset = {
         id: createId('pre'),
         name,
+        routine,
         layout: gridLayout,
+        viewMode: stackViewMode,
         videoItemIds: stageSlots.map((s) => s.videoItemId),
+        slotConfigs,
         createdAt: Date.now(),
       };
       const next = [preset, ...ytPresets];
       setYtPresets(next);
       saveYouTubePresets(next);
-      showToast(`Saved multi-stream layout "${name}"`);
+      showToast(`Saved ${routine} stack "${name}"`);
     },
-    [gridLayout, stageSlots, ytPresets, showToast]
+    [gridLayout, stackViewMode, stageSlots, ytPresets, showToast]
   );
 
   const handleLoadPreset = useCallback(
     (preset: MultiStreamPreset) => {
-      const videosToMount = preset.videoItemIds
-        .map((id) => ytVideos.find((v) => v.id === id))
-        .filter((v): v is YouTubeVideoItem => Boolean(v));
+      const nextSlots: StageSlot[] = [];
 
-      if (videosToMount.length === 0) {
-        showToast('No saved videos remain in this preset.');
+      if (preset.slotConfigs && preset.slotConfigs.length > 0) {
+        for (const cfg of preset.slotConfigs) {
+          const video = ytVideos.find((v) => v.id === cfg.videoItemId);
+          if (video) {
+            nextSlots.push(createStageSlot(video, cfg.isMuted, cfg));
+          }
+        }
+      } else {
+        preset.videoItemIds.forEach((id) => {
+          const video = ytVideos.find((v) => v.id === id);
+          if (video) {
+            nextSlots.push(createStageSlot(video, false));
+          }
+        });
+      }
+
+      if (nextSlots.length === 0) {
+        showToast('No saved tracks remain in this stack preset.');
         return;
       }
 
       setSoloSlotId(null);
-      setGridLayout(preset.layout);
-      setStageSlots(videosToMount.map((v, idx) => createStageSlot(v, idx > 0)));
-      showToast(`Loaded "${preset.name}" (${videosToMount.length} streams)`);
+      handleGridLayoutChange(preset.layout);
+      if (preset.viewMode) {
+        handleViewModeChange(preset.viewMode);
+      }
+      setStageSlots(nextSlots);
+      showToast(`Loaded "${preset.name}" (${nextSlots.length} tracks)`);
     },
-    [ytVideos, showToast]
+    [ytVideos, handleGridLayoutChange, handleViewModeChange, showToast]
   );
 
   const handleDeletePreset = useCallback(
@@ -534,7 +832,7 @@ export default function App() {
       const next = ytPresets.filter((p) => p.id !== presetId);
       setYtPresets(next);
       saveYouTubePresets(next);
-      showToast('Deleted preset');
+      showToast('Deleted stack preset');
     },
     [ytPresets, showToast]
   );
@@ -562,11 +860,12 @@ export default function App() {
                 ...slot,
                 title: patch.title ?? slot.title,
                 channel: patch.channel ?? slot.channel,
+                role: patch.role ?? slot.role,
               }
             : slot
         )
       );
-      showToast('Updated video details');
+      showToast('Updated library details');
     },
     [ytVideos, showToast]
   );
@@ -579,7 +878,7 @@ export default function App() {
       setYtVideos(next);
       saveYouTubeVideos(next);
       showToast(
-        `Moved ${videoIds.length} ${videoIds.length === 1 ? 'video' : 'videos'} to "${folderName}"`
+        `Moved ${videoIds.length} ${videoIds.length === 1 ? 'item' : 'items'} to "${folderName}"`
       );
     },
     [ytFolders, ytVideos, showToast]
@@ -597,15 +896,28 @@ export default function App() {
         return;
       }
 
+      const addedConfigs: PresetSlotConfig[] = toAdd.map((videoItemId) => ({
+        videoItemId,
+        volume: 35,
+        isMuted: false,
+        playbackRate: 1,
+        infiniteLoop: true,
+        targetLoops: 10,
+      }));
+
       const next = ytPresets.map((p) =>
         p.id === presetId
-          ? { ...p, videoItemIds: [...p.videoItemIds, ...toAdd] }
+          ? {
+              ...p,
+              videoItemIds: [...p.videoItemIds, ...toAdd],
+              slotConfigs: p.slotConfigs ? [...p.slotConfigs, ...addedConfigs] : undefined,
+            }
           : p
       );
       setYtPresets(next);
       saveYouTubePresets(next);
       showToast(
-        `Added ${toAdd.length} ${toAdd.length === 1 ? 'video' : 'videos'} to "${targetPreset.name}"`
+        `Added ${toAdd.length} ${toAdd.length === 1 ? 'item' : 'items'} to "${targetPreset.name}"`
       );
     },
     [ytPresets, showToast]
@@ -637,7 +949,7 @@ export default function App() {
         .map((v, idx) => ({ ...v, sortOrder: idx }));
       setYtVideos(next);
       saveYouTubeVideos(next);
-      showToast('Removed YouTube URL from library');
+      showToast('Removed entry from library');
     },
     [ytVideos, showToast]
   );
@@ -660,7 +972,7 @@ export default function App() {
   const handleDeleteFolder = useCallback(
     (folderId: string) => {
       const remaining = ytFolders.filter((f) => f.id !== folderId);
-      const fallbackId = remaining[0]?.id ?? 'fld_ambience';
+      const fallbackId = remaining[0]?.id ?? 'fld_focus';
       setYtFolders(remaining);
       saveYouTubeFolders(remaining);
       const reassigned = ytVideos.map((v) =>
@@ -672,6 +984,55 @@ export default function App() {
     },
     [ytFolders, ytVideos, showToast]
   );
+
+  // JSON Export & Import Backup
+  const handleExportBackup = useCallback(() => {
+    const json = exportKurodeckBackupJson({
+      videos: ytVideos,
+      folders: ytFolders,
+      presets: ytPresets,
+    });
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `kurodeck-backup-${dateStamp}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast(`Exported backup (${ytVideos.length} items, ${ytPresets.length} stacks)`);
+  }, [ytVideos, ytFolders, ytPresets, showToast]);
+
+  const handleImportBackup = useCallback(
+    async (file: File) => {
+      try {
+        const text = await file.text();
+        const restored = parseKurodeckBackupJson(text);
+        setYtFolders(restored.folders);
+        setYtVideos(restored.videos);
+        setYtPresets(restored.presets);
+        saveYouTubeFolders(restored.folders);
+        saveYouTubeVideos(restored.videos);
+        saveYouTubePresets(restored.presets);
+        showToast(
+          `Restored ${restored.videos.length} items & ${restored.presets.length} routine stacks`
+        );
+      } catch {
+        showToast('Invalid JSON backup file. Please select a valid Kurodeck backup.');
+      }
+    },
+    [showToast]
+  );
+
+  const existingTopics = useMemo(() => {
+    const all: string[] = [];
+    for (const v of ytVideos) {
+      all.push(...v.topics);
+    }
+    return normalizeTopics(all);
+  }, [ytVideos]);
 
   const isVideoContext = activeView === 'multistream' || activeView === 'urls';
 
@@ -699,7 +1060,7 @@ export default function App() {
           {/* Zone 1: Brand mark + wordmark */}
           <button
             type="button"
-            onClick={() => setActiveView('audio')}
+            onClick={() => handleSelectView('audio')}
             className="inline-flex items-center gap-2.5 font-display text-lg font-bold tracking-tight text-slate-100 hover:text-[#06E5F5] transition-colors whitespace-nowrap shrink-0"
           >
             <KurodeckLogo className="w-7 h-7 shrink-0" />
@@ -714,7 +1075,7 @@ export default function App() {
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setActiveView(item.id)}
+                  onClick={() => handleSelectView(item.id)}
                   className={`relative py-4 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
                     isActive
                       ? 'text-[#06E5F5]'
@@ -738,7 +1099,7 @@ export default function App() {
                 onClick={() => setShowAddVideoModal(true)}
                 className="px-4 py-2 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] rounded-md transition-colors whitespace-nowrap shrink-0"
               >
-                Add Video URL
+                Add Subliminal
               </button>
             ) : (
               <button
@@ -787,20 +1148,34 @@ export default function App() {
         ) : activeView === 'multistream' ? (
           <MultiStreamView
             stageSlots={stageSlots}
+            viewMode={stackViewMode}
             gridLayout={gridLayout}
             canvasMode={streamCanvasMode}
+            masterStackVolume={masterStackVolume}
+            effectiveYtMultiplier={effectiveYtMultiplier}
+            sleepSecondsLeft={sleepSecondsLeft}
+            isSleepFading={isSleepFading}
+            isOnline={isOnline}
             soloSlotId={soloSlotId}
             savedVideos={ytVideos}
             folders={ytFolders}
             presets={ytPresets}
-            onGridLayoutChange={setGridLayout}
+            onViewModeChange={handleViewModeChange}
+            onGridLayoutChange={handleGridLayoutChange}
             onCanvasModeChange={handleCanvasModeChange}
+            onMasterStackVolumeChange={handleMasterStackVolumeChange}
+            onApplyQuietLayer={handleApplyQuietLayer}
+            onApplyBalanceAll={handleApplyBalanceAll}
+            onStartSleepTimer={handleStartSleepTimer}
+            onCancelSleepTimer={handleCancelSleepTimer}
             onQuickAddUrl={handleQuickAddUrl}
             onAddSavedToStage={handleAddSavedToStage}
             onRemoveFromStage={handleRemoveFromStage}
             onReorderSlots={handleReorderStageSlots}
             onClearStage={handleClearStage}
             onSlotStateChange={handleSlotStateChange}
+            onLoopCompleted={handleVideoLoopCompleted}
+            onVideoPlayed={handleVideoPlayed}
             onRegisterHandle={handleRegisterPlayer}
             onPlayAll={handlePlayAllStreams}
             onPauseAll={handlePauseAllStreams}
@@ -822,11 +1197,21 @@ export default function App() {
             stageSlots={stageSlots}
             soloSlotId={soloSlotId}
             presets={ytPresets}
+            hybridCrossfade={hybridCrossfade}
+            audioCrossfadePct={Math.round(audioCrossfadeGain * 100)}
+            stackCrossfadePct={Math.round(stackCrossfadeGain * 100)}
+            effectiveYtMultiplier={effectiveYtMultiplier}
+            sleepSecondsLeft={sleepSecondsLeft}
+            isSleepFading={isSleepFading}
+            isOnline={isOnline}
+            onHybridCrossfadeChange={handleHybridCrossfadeChange}
             onPlayTrack={(id, q) => void audio.playTrack(id, q)}
             onTogglePlayPause={() => void audio.togglePlayPause()}
             onEqChange={audio.setEq}
             onRegisterHandle={handleRegisterPlayer}
             onSlotStateChange={handleSlotStateChange}
+            onLoopCompleted={handleVideoLoopCompleted}
+            onVideoPlayed={handleVideoPlayed}
             onSoloSlot={handleSoloSlot}
             onRemoveFromStage={handleRemoveFromStage}
             onReorderSlots={handleReorderStageSlots}
@@ -847,13 +1232,13 @@ export default function App() {
             onOpenAddModal={() => setShowAddVideoModal(true)}
             onAddToStageAndSwitch={(video) => {
               handleAddSavedToStage(video);
-              setActiveView('multistream');
+              handleSelectView('multistream');
             }}
             onLaunchMultiple={(chosen) => {
               setSoloSlotId(null);
-              setStageSlots(chosen.map((v, idx) => createStageSlot(v, idx > 0)));
-              setActiveView('multistream');
-              showToast(`Mounted ${chosen.length} YouTube streams simultaneously`);
+              setStageSlots(chosen.map((v) => createStageSlot(v, false)));
+              handleSelectView('multistream');
+              showToast(`Loaded ${chosen.length} subliminals into Stack Mixer`);
             }}
             onToggleFavorite={handleToggleVideoFavorite}
             onUpdateVideo={handleUpdateVideo}
@@ -865,9 +1250,11 @@ export default function App() {
             onDeleteFolder={handleDeleteFolder}
             onLoadPresetAndSwitch={(preset) => {
               handleLoadPreset(preset);
-              setActiveView('multistream');
+              handleSelectView('multistream');
             }}
             onDeletePreset={handleDeletePreset}
+            onExportBackup={handleExportBackup}
+            onImportBackup={(file) => void handleImportBackup(file)}
           />
         )}
       </main>
@@ -902,15 +1289,17 @@ export default function App() {
         onRemoveFromQueue={audio.removeFromQueue}
       />
 
-      {/* Add YouTube URL Modal */}
+      {/* Batch Add Subliminal URL Modal */}
       {showAddVideoModal && (
         <AddVideoModal
           folders={ytFolders}
+          existingTopics={existingTopics}
+          isOnline={isOnline}
           onClose={() => setShowAddVideoModal(false)}
           onSubmitUrls={async (payload) => {
             const res = await resolveAndSaveVideos(payload);
             if (!res.error && payload.launchToStage && activeView === 'urls') {
-              setActiveView('multistream');
+              handleSelectView('multistream');
             }
             return res;
           }}

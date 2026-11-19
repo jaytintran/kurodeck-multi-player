@@ -46,6 +46,12 @@ export interface StorageSummary {
   trackCount: number;
 }
 
+export type SubliminalRole = 'subliminal' | 'frequency' | 'booster' | 'flush' | 'ambience';
+
+export type StackViewMode = 'grid' | 'mixer' | 'mini';
+
+export type PresetRoutine = 'Morning' | 'Focus' | 'Sleep' | 'Overnight' | 'Custom';
+
 export interface YouTubeVideoItem {
   id: string; // unique library entry id
   videoId: string; // 11-char YouTube video ID
@@ -53,7 +59,15 @@ export interface YouTubeVideoItem {
   title: string;
   channel: string;
   folderId: string;
-  notes: string;
+  notes: string; // Legacy alias kept in sync with benefits
+  role: SubliminalRole;
+  topics: string[];
+  benefits: string;
+  playCount: number;
+  loopCount: number;
+  listeningSeconds: number;
+  lastListenedAt?: number;
+  pendingMetadata?: boolean;
   addedAt: number;
   isFavorite: boolean;
   sortOrder: number;
@@ -80,9 +94,17 @@ export type StreamGridLayout =
 
 export type StreamCanvasMode = 'fit' | 'canvas';
 
-export type SavedUrlGroupBy = 'none' | 'folder' | 'channel' | 'favorite' | 'preset' | 'date';
+export type SavedUrlGroupBy =
+  | 'none'
+  | 'topic'
+  | 'creator'
+  | 'role'
+  | 'folder'
+  | 'preset'
+  | 'favorite'
+  | 'date';
 
-export type SavedUrlSortBy = 'custom' | 'title' | 'channel' | 'addedAt';
+export type SavedUrlSortBy = 'custom' | 'title' | 'channel' | 'addedAt' | 'loops' | 'listening';
 
 export type SavedUrlCardSize = 'compact' | 'small' | 'medium' | 'large' | 'list';
 
@@ -93,16 +115,33 @@ export interface StageSlot {
   title: string;
   channel: string;
   url: string;
-  volume: number; // 0-100
+  role: SubliminalRole;
+  volume: number; // 0-100 personal mix volume
   isMuted: boolean;
   isPlaying: boolean;
+  playbackRate: number; // 0.5 - 2.0
+  infiniteLoop: boolean;
+  targetLoops: number; // >= 1 when infiniteLoop is false
+  completedLoops: number;
+}
+
+export interface PresetSlotConfig {
+  videoItemId: string;
+  volume: number;
+  isMuted: boolean;
+  playbackRate: number;
+  infiniteLoop: boolean;
+  targetLoops: number;
 }
 
 export interface MultiStreamPreset {
   id: string;
   name: string;
+  routine: PresetRoutine;
   layout: StreamGridLayout;
+  viewMode?: StackViewMode;
   videoItemIds: string[];
+  slotConfigs?: PresetSlotConfig[];
   createdAt: number;
 }
 
@@ -112,5 +151,14 @@ export interface StagePlayerHandle {
   mute: () => void;
   unmute: () => void;
   setVolume: (vol: number) => void;
+  setPlaybackRate: (rate: number) => void;
   seekTo: (seconds: number) => void;
+}
+
+export interface KurodeckBackupPayload {
+  schemaVersion: 2;
+  exportedAt: string;
+  videos: YouTubeVideoItem[];
+  folders: YouTubeFolder[];
+  presets: MultiStreamPreset[];
 }

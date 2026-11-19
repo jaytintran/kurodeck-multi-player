@@ -1,9 +1,12 @@
 import { useState, type DragEvent, type RefObject } from 'react';
 import {
+  Clock,
+  Grid2x2,
   Layers,
   Pause,
   Play,
   Plus,
+  Sliders,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -27,11 +30,21 @@ interface HybridDeckViewProps {
   stageSlots: StageSlot[];
   soloSlotId: string | null;
   presets: MultiStreamPreset[];
+  hybridCrossfade: number; // 0 = Offline Audio only, 50 = Balanced, 100 = YouTube Stack only
+  audioCrossfadePct: number;
+  stackCrossfadePct: number;
+  effectiveYtMultiplier: number;
+  sleepSecondsLeft: number | null;
+  isSleepFading: boolean;
+  isOnline: boolean;
+  onHybridCrossfadeChange: (val: number) => void;
   onPlayTrack: (trackId: string, queueIds: string[]) => void;
   onTogglePlayPause: () => void;
   onEqChange: (eq: EqSettings) => void;
   onRegisterHandle: (slotId: string, handle: StagePlayerHandle | null) => void;
   onSlotStateChange: (slotId: string, patch: Partial<StageSlot>) => void;
+  onLoopCompleted: (videoItemId: string) => void;
+  onVideoPlayed: (videoItemId: string) => void;
   onSoloSlot: (slotId: string) => void;
   onRemoveFromStage: (slotId: string) => void;
   onReorderSlots: (sourceSlotId: string, targetSlotId: string) => void;
@@ -43,6 +56,12 @@ interface HybridDeckViewProps {
   onOpenAddVideoModal: () => void;
 }
 
+function formatCountdown(seconds: number): string {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function HybridDeckView({
   tracks,
   currentTrack,
@@ -52,11 +71,21 @@ export function HybridDeckView({
   stageSlots,
   soloSlotId,
   presets,
+  hybridCrossfade,
+  audioCrossfadePct,
+  stackCrossfadePct,
+  effectiveYtMultiplier,
+  sleepSecondsLeft,
+  isSleepFading,
+  isOnline,
+  onHybridCrossfadeChange,
   onPlayTrack,
   onTogglePlayPause,
   onEqChange,
   onRegisterHandle,
   onSlotStateChange,
+  onLoopCompleted,
+  onVideoPlayed,
   onSoloSlot,
   onRemoveFromStage,
   onReorderSlots,
@@ -67,13 +96,15 @@ export function HybridDeckView({
   onLoadPreset,
   onOpenAddVideoModal,
 }: HybridDeckViewProps) {
+  const [stackLayout, setStackLayout] = useState<'mixer' | 'grid'>('mixer');
   const [expandedSlotId, setExpandedSlotId] = useState<string | null>(null);
   const [draggedSlotId, setDraggedSlotId] = useState<string | null>(null);
   const [dragOverSlotId, setDragOverSlotId] = useState<string | null>(null);
   const trackIds = tracks.map((t) => t.id);
+
   const displayedSlots = expandedSlotId
     ? stageSlots.filter((s) => s.slotId === expandedSlotId)
-    : stageSlots.slice(0, 4);
+    : stageSlots;
 
   const handleDragStartTile = (slotId: string, e: DragEvent<HTMLDivElement>) => {
     setDraggedSlotId(slotId);
@@ -100,7 +131,88 @@ export function HybridDeckView({
   };
 
   return (
-    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto">
+    <div className="p-4 sm:p-6 max-w-[1600px] mx-auto space-y-5">
+      {/* Master Crossfader Deck Strip */}
+      <section className="bg-[#0E121B] border border-[#1E2638] rounded-lg px-4 sm:px-5 py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="space-y-0.5 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-sm font-semibold text-slate-100">Master Crossfader</h1>
+            {sleepSecondsLeft !== null && (
+              <span className="inline-flex items-center gap-1 text-xs font-mono tabular-nums text-[#06E5F5]">
+                <Clock className="w-3.5 h-3.5" />
+                {isSleepFading ? 'Fading ' : ''}
+                {formatCountdown(sleepSecondsLeft)}
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-slate-400">
+            Balance local offline masking audio against your active YouTube subliminal stack
+          </p>
+        </div>
+
+        <div className="flex-1 max-w-xl flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex items-center justify-between sm:justify-start gap-2 text-xs shrink-0">
+            <span className="font-medium text-slate-200">Offline Audio</span>
+            <span className="font-mono tabular-nums text-[#06E5F5] w-9 text-right">
+              {audioCrossfadePct}%
+            </span>
+          </div>
+
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={hybridCrossfade}
+            onChange={(e) => onHybridCrossfadeChange(Number(e.target.value))}
+            aria-label="Crossfade between Offline Audio and YouTube Stack"
+            className="cyber-range flex-1"
+          />
+
+          <div className="flex items-center justify-between sm:justify-end gap-2 text-xs shrink-0">
+            <span className="font-mono tabular-nums text-[#06E5F5] w-9">
+              {stackCrossfadePct}%
+            </span>
+            <span className="font-medium text-slate-200">YouTube Stack</span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1 p-0.5 bg-[#07090E] border border-[#1E2638] rounded-md shrink-0 self-start lg:self-auto">
+          <button
+            type="button"
+            onClick={() => onHybridCrossfadeChange(20)}
+            className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+              hybridCrossfade <= 30
+                ? 'bg-[#172033] text-[#06E5F5]'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            Audio Lead
+          </button>
+          <button
+            type="button"
+            onClick={() => onHybridCrossfadeChange(50)}
+            className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+              hybridCrossfade > 30 && hybridCrossfade < 70
+                ? 'bg-[#172033] text-[#06E5F5]'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            Balanced
+          </button>
+          <button
+            type="button"
+            onClick={() => onHybridCrossfadeChange(80)}
+            className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap ${
+              hybridCrossfade >= 70
+                ? 'bg-[#172033] text-[#06E5F5]'
+                : 'text-slate-400 hover:text-slate-100'
+            }`}
+          >
+            Stack Lead
+          </button>
+        </div>
+      </section>
+
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
         {/* Left Column: Offline Audio Deck + EQ + Track Selector */}
         <section className="xl:col-span-5 bg-[#0E121B] border border-[#1E2638] rounded-lg overflow-hidden flex flex-col">
@@ -108,7 +220,7 @@ export function HybridDeckView({
             <div>
               <h2 className="text-sm font-semibold text-slate-100">Offline Audio Console</h2>
               <p className="text-xs text-slate-400">
-                Play local IndexedDB audio alongside live visual streams
+                Local IndexedDB ambient / rain / music masking layer
               </p>
             </div>
             <span className="text-xs font-mono tabular-nums text-slate-400">
@@ -133,7 +245,9 @@ export function HybridDeckView({
                   {currentTrack ? currentTrack.title : 'Select an offline track'}
                 </p>
                 <p className="text-xs text-slate-400 truncate">
-                  {currentTrack ? `${currentTrack.artist} · ${currentTrack.format}` : 'Audio Vault ready'}
+                  {currentTrack
+                    ? `${currentTrack.artist} · ${currentTrack.format}`
+                    : 'Audio Vault ready'}
                 </p>
               </div>
               <button
@@ -232,21 +346,55 @@ export function HybridDeckView({
           </div>
         </section>
 
-        {/* Right Column: Live YouTube Multi-Video Monitor */}
+        {/* Right Column: Live YouTube Subliminal Stack */}
         <section className="xl:col-span-7 space-y-4">
           <div className="bg-[#0E121B] border border-[#1E2638] rounded-lg px-4 py-3 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-sm font-semibold text-slate-100">Multi-Stream Visual Matrix</h2>
+              <h2 className="text-sm font-semibold text-slate-100">Active Subliminal Stack</h2>
               <p className="text-xs text-slate-400">
-                Simultaneous YouTube streams synchronized with your desk
+                <span className="font-mono tabular-nums">{stageSlots.length}</span> layered
+                {stageSlots.length === 1 ? ' channel' : ' channels'} balanced through crossfader
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex items-center gap-0.5 p-0.5 bg-[#07090E] border border-[#1E2638] rounded-md mr-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpandedSlotId(null);
+                    setStackLayout('mixer');
+                  }}
+                  className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded ${
+                    stackLayout === 'mixer'
+                      ? 'bg-[#172033] text-[#06E5F5]'
+                      : 'text-slate-400 hover:text-slate-100'
+                  }`}
+                >
+                  <Sliders className="w-3 h-3" />
+                  Mixer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpandedSlotId(null);
+                    setStackLayout('grid');
+                  }}
+                  className={`inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded ${
+                    stackLayout === 'grid'
+                      ? 'bg-[#172033] text-[#06E5F5]'
+                      : 'text-slate-400 hover:text-slate-100'
+                  }`}
+                >
+                  <Grid2x2 className="w-3 h-3" />
+                  Grid
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={onPlayAllStreams}
-                disabled={stageSlots.length === 0}
+                disabled={stageSlots.length === 0 || !isOnline}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[#07090E] bg-[#06E5F5] hover:bg-[#38EEFF] disabled:opacity-40 rounded whitespace-nowrap"
               >
                 <Play className="w-3 h-3 fill-current" />
@@ -285,14 +433,16 @@ export function HybridDeckView({
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#06E5F5] bg-[#141A29] border border-[#06E5F5]/30 rounded whitespace-nowrap"
               >
                 <Plus className="w-3 h-3" />
-                Add URL
+                Add
               </button>
             </div>
           </div>
 
           {displayedSlots.length === 0 ? (
             <div className="bg-[#0E121B] border border-[#1E2638] rounded-lg p-10 text-center space-y-4">
-              <p className="text-sm font-medium text-slate-200">No active YouTube streams on stage</p>
+              <p className="text-sm font-medium text-slate-200">
+                No active subliminals in your stack
+              </p>
               <div className="flex flex-wrap justify-center gap-2">
                 {presets.map((preset) => (
                   <button
@@ -308,15 +458,26 @@ export function HybridDeckView({
               </div>
             </div>
           ) : (
-            <div className={`grid gap-4 ${expandedSlotId ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
+            <div
+              className={
+                stackLayout === 'mixer' && !expandedSlotId
+                  ? 'flex flex-col gap-2.5'
+                  : `grid gap-4 ${expandedSlotId ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`
+              }
+            >
               {displayedSlots.map((slot) => (
                 <YouTubePlayerTile
                   key={slot.slotId}
                   slot={slot}
+                  viewMode={stackLayout}
+                  isOnline={isOnline}
+                  volumeMultiplier={effectiveYtMultiplier}
                   isExpanded={expandedSlotId === slot.slotId}
                   isSoloed={soloSlotId === slot.slotId}
                   onRegisterHandle={onRegisterHandle}
                   onSlotStateChange={onSlotStateChange}
+                  onLoopCompleted={onLoopCompleted}
+                  onVideoPlayed={onVideoPlayed}
                   onSolo={onSoloSlot}
                   onToggleExpand={(id) =>
                     setExpandedSlotId((prev) => (prev === id ? null : id))

@@ -1,10 +1,10 @@
 import type { AudioTrackRecord } from '../types/media';
 
-export const COVER_NEON_RAINDRIFT = '/src/assets/images/album_neon_raindrift_1794988084136.jpg';
-export const COVER_SUBSTATION_PULSE = '/src/assets/images/album_substation_pulse_1794988083760.jpg';
-export const COVER_MIDNIGHT_OVERPASS = '/src/assets/images/album_midnight_overpass_1794988084330.jpg';
-export const COVER_CHROME_HORIZON = '/src/assets/images/album_chrome_horizon_1794988083793.jpg';
-export const STREAM_FALLBACK_BACKDROP = '/src/assets/images/stream_backdrop_fallback_1794988084252.jpg';
+export const COVER_NEON_RAINDRIFT = '/assets/images/album_neon_raindrift_1794988084136.jpg';
+export const COVER_SUBSTATION_PULSE = '/assets/images/album_substation_pulse_1794988083760.jpg';
+export const COVER_MIDNIGHT_OVERPASS = '/assets/images/album_midnight_overpass_1794988084330.jpg';
+export const COVER_CHROME_HORIZON = '/assets/images/album_chrome_horizon_1794988083793.jpg';
+export const STREAM_FALLBACK_BACKDROP = '/assets/images/stream_backdrop_fallback_1794988084252.jpg';
 
 interface SynthPreset {
   id: string;

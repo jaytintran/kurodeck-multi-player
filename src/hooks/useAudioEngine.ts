@@ -5,9 +5,14 @@ import type { AudioTrackMeta, EqSettings, RepeatMode } from '../types/media';
 interface UseAudioEngineOptions {
   tracks: AudioTrackMeta[];
   onTrackPlayCountIncrement?: (trackId: string) => void;
+  externalGainMultiplier?: number;
 }
 
-export function useAudioEngine({ tracks, onTrackPlayCountIncrement }: UseAudioEngineOptions) {
+export function useAudioEngine({
+  tracks,
+  onTrackPlayCountIncrement,
+  externalGainMultiplier = 1,
+}: UseAudioEngineOptions) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -155,12 +160,13 @@ export function useAudioEngine({ tracks, onTrackPlayCountIncrement }: UseAudioEn
     }
   }, [eq]);
 
-  // Sync volume & mute
+  // Sync volume, mute, and external crossfade/sleep fade multiplier
   useEffect(() => {
     if (audioRef.current) {
-      audioRef.current.volume = isMuted ? 0 : volume;
+      const clampedMult = Math.max(0, Math.min(1, externalGainMultiplier));
+      audioRef.current.volume = isMuted ? 0 : Math.max(0, Math.min(1, volume * clampedMult));
     }
-  }, [volume, isMuted]);
+  }, [volume, isMuted, externalGainMultiplier]);
 
   // Sync playback rate
   useEffect(() => {
@@ -254,6 +260,13 @@ export function useAudioEngine({ tracks, onTrackPlayCountIncrement }: UseAudioEn
       audio.pause();
     }
   }, [ensureWebAudioGraph, playTrack]);
+
+  const pause = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio && !audio.paused) {
+      audio.pause();
+    }
+  }, []);
 
   const playNext = useCallback(
     async (triggeredByEnd = false) => {
@@ -402,6 +415,7 @@ export function useAudioEngine({ tracks, onTrackPlayCountIncrement }: UseAudioEn
     errorMessage,
     playTrack,
     togglePlayPause,
+    pause,
     playNext,
     playPrevious,
     seek,
